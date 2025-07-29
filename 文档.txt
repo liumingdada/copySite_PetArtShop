@@ -1,0 +1,40 @@
+
+
+全站替换 ：
+abc.com 
+社媒帐号YOURNAME
+<title>Pet Creations Art 
+
+
+
+
+*** 配置说明 ***
+
+
+
+===1.后台路径目录如果修改， 需要修改引用文件
+/checkout.php
+123-124行
+        // 保存订单到XML文件
+        $xmlFilePath = 'admin/data/orders.xml';
+这里是可能需要修改的, 管理目录 后面可能改成其它的
+
+/order-status.php
+第8行
+ $xml = simplexml_load_file('admin/data/orders.xml');
+中 引用了后台订单位置， 如果修改了admin/后台路径，也要相应修改
+
+===3.后台管理密码设置 
+管理目录/index.php 
+4-5行
+// 设置管理员密码（请更换为强密码）
+$admin_password = '123456';
+
+===4. 支付收款 信息配置 ，
+ 在管理目录  admin/下的 payment_config.php 中设置， 比如 银行帐号 SWFIT， paypal帐号， 西联信息等
+
+===5. 订单管理页面功能
+搜索区的 订单号/客户  查询已完成， 其它两个 按状态 与时间日期 筛选功能 暂未开发 预留
+
+
+

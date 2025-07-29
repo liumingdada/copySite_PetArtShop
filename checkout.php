@@ -1,0 +1,2457 @@
+<?php
+
+// checkout.php
+$saveOrderOK=0;//订单保存处理状态， 成功1， 异常0
+
+/**
+ * 生成包含时间信息的短订单号
+ * 格式: 业务类型(1位) + 年月(2位) + 月日时(6位) + 随机数(4位) + 校验位(1位)
+ * 示例: P2507081745HJKL9
+ */
+function generateEnhancedOrderId($businessType = 'P') {
+    $now = new DateTime();
+    $datePart = substr($now->format('YmdHi'), 2); // 如: 2507081745 (包含分钟)
+    
+    // 生成4位随机数 (约1.6百万组合)
+    $randomBytes = random_bytes(2);
+    $randomInt = unpack('N', $randomBytes . "\0\0\0\0")[1] % 1679616;
+    $randomPart = strtoupper(base_convert($randomInt, 10, 36));
+    $randomPart = str_pad($randomPart, 4, '0', STR_PAD_LEFT);
+    
+    $checksumChar = _calculateChecksum($businessType . $datePart . $randomPart);
+    return $businessType . $datePart . $randomPart . $checksumChar;
+}
+
+/**
+ * 计算校验字符 (基于改进的Luhn算法)
+ * 使用36进制字符集，支持数字和大写字母
+ */
+function _calculateChecksum($input) {
+    $chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    $modulus = strlen($chars);
+    $length = strlen($input);
+    $sum = 0;
+    
+    // 从右到左处理每个字符
+    for ($i = 0; $i < $length; $i++) {
+        $char = $input[$length - $i - 1];
+        $codePoint = strpos($chars, $char);
+        
+        // 偶数位加倍 (从右到左数)
+        if ($i % 2 === 0) {
+            $codePoint *= 2;
+            
+            // 如果加倍后超过字符集大小，则减去字符集大小
+            if ($codePoint >= $modulus) {
+                $codePoint -= $modulus;
+            }
+        }
+        
+        $sum += $codePoint;
+    }
+    
+    // 计算校验字符
+    $checkCodePoint = ($modulus - ($sum % $modulus)) % $modulus;
+    return $chars[$checkCodePoint];
+}
+
+// 可能输出: P2507081745HJKL (14位)
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    // // 打印接收到的表单数据
+    // echo "<h2>接收到的表单数据：</h2>";
+    // echo "<ul>";
+    // foreach ($_POST as $key => $value) {
+    //     echo "<li>$key: " . htmlspecialchars($value) . "</li>";
+    // }
+    // echo "</ul>";
+
+    // 检查是否有文件上传并处理
+    if (isset($_FILES['UploadedPhotos'])) {
+        $uploadedFile = $_FILES['UploadedPhotos'];
+
+        if ($uploadedFile['error'] === UPLOAD_ERR_OK) {
+            // 获取文件信息
+            $fileType = $uploadedFile['type'];
+            $fileSize = $uploadedFile['size'];
+            $tempFilePath = $uploadedFile['tmp_name'];
+            $maxFileSize = 10 * 1024 * 1024; // 10MB in bytes
+
+            if ($fileSize > $maxFileSize) {
+                die("<br>Max size: 10MB！<br><br><a href='javascript:history.back()'>back</a>");
+            }
+
+            // 生成新的文件名
+            $timestamp = microtime(true);
+            $datePart = date('YmdHis', $timestamp);
+            $msecPart = substr(str_replace('.', '', $timestamp - floor($timestamp)), 0, 3);
+            $randomChars = substr(md5(rand()), 0, 4);
+            $newFileName = $datePart . $msecPart . $randomChars;
+            $fileExtension = pathinfo($uploadedFile['name'], PATHINFO_EXTENSION);
+            $fileName = $newFileName . '.' . $fileExtension;
+
+            // 设置上传目录
+            $uploadDirectory = 'uploads/' . date('Ymd') . '/';
+            if (!is_dir($uploadDirectory)) {
+                mkdir($uploadDirectory, 0777, true);
+            }
+
+            $targetFilePath = $uploadDirectory . $fileName;
+
+            if (move_uploaded_file($tempFilePath, $targetFilePath)) {
+                // echo "<h2>文件上传成功！</h2>";
+                // echo "<p>文件名: " . htmlspecialchars($fileName) . "</p>";
+                // echo "<p>文件类型: " . htmlspecialchars($fileType) . "</p>";
+                // echo "<p>文件大小: " . htmlspecialchars($fileSize) . " 字节</p>";
+                // echo "<p>保存路径: " . htmlspecialchars($targetFilePath) . "</p>";
+                // echo "<img src='" . htmlspecialchars($targetFilePath) . "' alt='上传的图片' style='max-width: 300px;'>";
+            } else {
+                // echo "<p>文件上传失败，请重试。</p>";
+            }
+        } else {
+            $errorMessages = [
+                UPLOAD_ERR_INI_SIZE => "文件大小超过了 php.ini 中的 upload_max_filesize 设置。",
+                UPLOAD_ERR_FORM_SIZE => "文件大小超过了 HTML 表单中指定的最大值。",
+                UPLOAD_ERR_PARTIAL => "文件只有部分被上传。",
+                UPLOAD_ERR_NO_FILE => "没有文件被上传。",
+                UPLOAD_ERR_NO_TMP_DIR => "缺少临时文件夹。",
+                UPLOAD_ERR_CANT_WRITE => "无法写入文件到磁盘。",
+                UPLOAD_ERR_EXTENSION => "文件上传被扩展阻止。"
+            ];
+
+            $errorCode = $uploadedFile['error'];
+            echo "<!-- <p>文件上传错误: " . (isset($errorMessages[$errorCode]) ? $errorMessages[$errorCode] : "未知错误") . "</p> -->";
+        }
+    } else {
+        // echo "<p>未找到上传的文件。</p>";
+    }
+
+    // 生成订单ID
+    $orderID = generateEnhancedOrderId('P'); // 生成一个以"P"为业务类型的订单号
+// 可能输出: P2507081745HJKL9
+
+    // 计算订单总金额
+    $cartQuantity = isset($_POST['cartQuantity']) ? (int)$_POST['cartQuantity'] : 1;
+    $cartPrice = isset($_POST['cartPrice']) ? (int)$_POST['cartPrice'] : 0;
+    $chooseDownload = isset($_POST['chooseDownload']) ? (int)$_POST['chooseDownload'] : 0;
+    $chooseFaster = isset($_POST['chooseFaster']) ? (int)$_POST['chooseFaster'] : 0;
+    $amount = $cartPrice + ($chooseDownload ? 10 : 0) + ($chooseFaster ? 10 : 0);
+
+    // 收集订单信息
+    $orderData = [
+        'orderID' => $orderID,
+        'amount' => $amount,
+        'cartQuantity' => $cartQuantity,
+        'cartPrice' => $cartPrice,
+        'chooseDownload' => $chooseDownload,
+        'chooseFaster' => $chooseFaster,
+        'ChooseHowManyPets' => isset($_POST['ChooseHowManyPets']) ? $_POST['ChooseHowManyPets'] : 1,
+        'ChooseYourSize' => isset($_POST['ChooseYourSize']) ? $_POST['ChooseYourSize'] : '1.download',
+        'BackgroundImage' => isset($_POST['BackgroundImage']) ? $_POST['BackgroundImage'] : '1.Magic Forest',
+        'uploadedFile' => isset($targetFilePath) ? $targetFilePath : '',
+        'PetName' => isset($_POST['PetName']) ? $_POST['PetName'] : '',
+        'remark' => isset($_POST['Notes']) ? $_POST['Notes'] : '',
+
+        'email' => isset($_POST['email']) ? $_POST['email'] : '',
+        'FullName' => isset($_POST['FullName']) ? $_POST['FullName'] : '',
+        'Address' => isset($_POST['Address']) ? $_POST['Address'] : '',
+        'City' => isset($_POST['City']) ? $_POST['City'] : '',
+        'State' => isset($_POST['State']) ? $_POST['State'] : '',
+        'ZIP' => isset($_POST['ZIP']) ? $_POST['ZIP'] : '',
+        'Phone' => isset($_POST['Phone']) ? $_POST['Phone'] : '',
+        
+    ];
+
+    // 保存订单信息到JSON文件， 作为 备份订单数据 
+    $jsonFilePath = 'orders/' . $orderID . '.json';
+    if (!is_dir('orders')) {
+        mkdir('orders', 0777, true);
+    }
+
+    
+
+    if (file_put_contents($jsonFilePath, json_encode($orderData, JSON_PRETTY_PRINT))) {
+        // 保存订单到XML文件 ， 这个主订单数据库 
+        $xmlFilePath = 'admin/data/orders.xml';
+        $xml = simplexml_load_file($xmlFilePath);
+        if ($xml) {
+            $order = $xml->addChild('order');
+            $order->addAttribute('id', $orderID);
+            
+            // 添加订单数据字段
+            $order->addChild('amount', $orderData['amount']);
+            $order->addChild('cartQuantity', $orderData['cartQuantity']);
+            $order->addChild('cartPrice', $orderData['cartPrice']);
+            
+            $order->addChild('chooseDownload', $orderData['chooseDownload']);
+            $order->addChild('chooseFaster', $orderData['chooseFaster']);
+            $order->addChild('ChooseHowManyPets', $orderData['ChooseHowManyPets']);
+            $order->addChild('ChooseYourSize', $orderData['ChooseYourSize']);
+            $order->addChild('BackgroundImage', htmlspecialchars($orderData['BackgroundImage'] ?? '')); 
+            $order->addChild('uploadedFile', htmlspecialchars($orderData['uploadedFile']));
+            $order->addChild('PetName', htmlspecialchars($orderData['PetName']));
+            $order->addChild('remark', htmlspecialchars($orderData['remark'] ?? ''));
+
+            $order->addChild('email', htmlspecialchars($orderData['email']));
+            $order->addChild('FullName', htmlspecialchars($orderData['FullName']));
+            $order->addChild('Address', htmlspecialchars($orderData['Address']));
+            $order->addChild('City', htmlspecialchars($orderData['City']));
+            $order->addChild('State', htmlspecialchars($orderData['State']));
+            $order->addChild('ZIP', htmlspecialchars($orderData['ZIP']));
+            $order->addChild('Phone', htmlspecialchars($orderData['Phone']));
+            
+            
+            
+            // 添加状态和物流信息
+            $order->addChild('paymentStatus', '未支付');
+            $order->addChild('status', 'pending');
+            $order->addChild('shipping_number', '');
+            
+            // 添加日期时间信息
+            $currentDate = date('Y-m-d');
+            $currentDateTime = date('Y-m-d\TH:i:s');
+            $currentDateTimeForUpdate = date('Y-m-d H:i:s');
+            $order->addChild('order_date', $currentDate);
+            $order->addChild('created_at', $currentDateTime);
+            $order->addChild('updated_at', $currentDateTimeForUpdate);
+            
+            // 将新订单移动到XML的最前面
+            $dom = dom_import_simplexml($xml)->ownerDocument;
+            $orders = $dom->getElementsByTagName('order');
+            $newOrder = $orders->item($orders->length - 1); // 获取最后添加的订单
+            $dom->documentElement->insertBefore($newOrder, $dom->documentElement->firstChild);
+            
+            // 保存XML文件
+            if (!$xml->asXML($xmlFilePath)) {
+                echo "<p>保存订单失败。</p>";
+            }
+        } else {
+            echo "<p>无法加载订单数据。</p>";
+        }
+        
+        $saveOrderOK=1;
+    } else {
+        echo "<p>保存订单信息失败。请退回重试。</p>";
+        $saveOrderOK=0;
+    }
+
+    // 跳转到payment.php
+    // header("Location: payments.php?orderID=" . urlencode($orderID) . "&amount=" . urlencode($amount));
+    // exit;
+} else {
+    echo "<p>未接收到表单数据。请退回重试。 </p>";
+    $saveOrderOK=0;
+}
+?>
+
+<?php
+if ($saveOrderOK==1){
+//========================这里是网页代码 ， 复制于payments.php， 其中 有几个变量 需要处理 $orderID $amount
+?>
+
+<!doctype html>
+<html lang="en">
+  <head>    
+    <!-- Title & Meta -->
+    <title>Payments | Hand-Drawn by Real Artists &ndash; Pet Creations Art</title>
+      <meta name="description" content="We draw your pet as a cute cartoon! The #1 gift for pet lovers. Free unlimited revisions until you are happy or your money back. Personalize your pet now at Pet Creations.">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="initial-scale=1, width=device-width, height=device-height, viewport-fit=cover">
+   
+
+
+    <!-- Favicon -->
+    <link rel="icon" href="static/image/favicon.png" type="image/png">
+
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="static/css/css2.css" rel="stylesheet">
+
+    <!-- Swiper JS -->
+    <link rel="stylesheet" href="static/css/swiper-bundle.min.css" >
+    <script src="static/js/swiper-bundle.min.js"></script>
+
+    <!-- Global CSS -->
+    <link href="static/css/theme-global.css" rel="stylesheet">
+    <link href="static/css/theme-header.css" rel="stylesheet">
+    <link href="static/css/theme-mini-cart.css" rel="stylesheet">
+    <link href="static/css/theme-footer.css" rel="stylesheet">
+
+    <!-- Global JS -->
+    
+    <script defer src="static/js/theme-global.js"></script>
+    <script defer src="static/js/theme-header.js"></script>
+    
+
+    <!-- Global Cart -->
+    
+
+    <!-- Page Specific CSS/JS -->    
+      <!-- Product -->
+      <link href="static/css/main-product.css" rel="stylesheet">
+  <link rel="stylesheet" href="static/css/font-awesome.min.css">
+
+<link href="static/css/addyi.css" rel="stylesheet">
+<script src="https://code.jquery.com/jquery-2.1.1.min.js"></script>
+
+
+<!-- END app block -->
+<link rel="canonical" href="https://abc.com/products/personalised-custom-cartoon-pet-canvas">
+<link href="https://monorail-edge.shopifysvc.com" rel="dns-prefetch">
+
+ 
+</head>
+
+  <body>
+    <!-- Header -->
+    <div id="shopify-section-theme-announcement" class="shopify-section"><style>
+    #shopify-section-theme-announcement {
+        position: sticky;
+        top: 0;
+        z-index: 200;
+    }
+
+    #announcement {
+        color: #ffffff;
+        text-align: center;
+        padding: 9px 5px;
+        font-size: 1.125rem;
+        font-weight: 600;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        background-color: #75c0ff;
+    }
+</style>
+
+
+    <div id="announcement">SHOP NOW FOR 25% OFF</div>
+
+
+</div>
+    <div id="shopify-section-theme-header-background" class="shopify-section"><style>
+
+    [id="theme-header-background"] {
+        height: 0;
+        width: 100%;
+        position: relative;
+    }
+
+    #headerBackground {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        z-index: -1;
+    }
+
+
+</style>
+
+<section id="theme-header-background">
+
+    
+        <picture id="headerBackground">
+            <source media="(max-width: 550px)" srcset="//petcreationsart.com/cdn/shop/files/Group_1000006875_6c5e7b19-4dd5-4f99-b9dd-dad86b34deaf.png?v=1720553449&width=600">
+            <source media="(max-width: 800px)" srcset="//petcreationsart.com/cdn/shop/files/Group_1000006875_6c5e7b19-4dd5-4f99-b9dd-dad86b34deaf.png?v=1720553449&width=900">
+            <source media="(max-width: 1400px)" srcset="//petcreationsart.com/cdn/shop/files/Group_1000006873_5.png?v=1720553425&width=1500">
+            <source srcset="//petcreationsart.com/cdn/shop/files/Group_1000006873_5.png?v=1720553425&width=2016">
+            <img src="static/picture/Group_1000006873_5.png" alt="" loading="lazy">
+        </picture>
+    
+
+</section>
+
+</div>
+<div id="shopify-section-theme-header" class="shopify-section">
+<style>    
+    [id="image_link_bHBKC7"] .headerNavLinkExpandedBodyItemImage {
+        max-width: 148px;
+    }
+    @media (max-width: 800px) {
+        [id="image_link_bHBKC7"] .sliderBlocksItemImage {
+            max-width: 132px;
+        }
+    }    
+    [id="image_link_caaNQC"] .headerNavLinkExpandedBodyItemImage {
+        max-width: 93px;
+    }
+    @media (max-width: 800px) {
+        [id="image_link_caaNQC"] .sliderBlocksItemImage {
+            max-width: 81px;
+        }
+    } 
+    [id="image_link_A6UpX8"] .headerNavLinkExpandedBodyItemImage {
+        max-width: 138px;
+    }
+    @media (max-width: 800px) {
+        [id="image_link_A6UpX8"] .sliderBlocksItemImage {
+            max-width: 131px;
+        }
+    }
+    [id="image_link_kBAJCg"] .headerNavLinkExpandedBodyItemImage {
+        max-width: 151px;
+    }
+    @media (max-width: 800px) {
+        [id="image_link_kBAJCg"] .sliderBlocksItemImage {
+            max-width: 137px;
+        }
+    }    
+</style>
+
+<header id="header">
+    <div id="headerInner" class="container">
+
+        <div id="headerMenu" class="openNav">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="12" viewbox="0 0 16 12" fill="none">
+                <path d="M0 1C0 0.447715 0.447715 0 1 0H15C15.5523 0 16 0.447715 16 1C16 1.55228 15.5523 2 15 2H1C0.447715 2 0 1.55228 0 1Z" fill="#868684"></path>
+                <path d="M0 6C0 5.44772 0.447715 5 1 5H15C15.5523 5 16 5.44772 16 6C16 6.55228 15.5523 7 15 7H1C0.447715 7 0 6.55228 0 6Z" fill="#868684"></path>
+                <path d="M0 11C0 10.4477 0.447715 10 1 10H15C15.5523 10 16 10.4477 16 11C16 11.5523 15.5523 12 15 12H1C0.447715 12 0 11.5523 0 11Z" fill="#868684"></path>
+            </svg>
+        </div>
+
+        <button id="sliderClose" class="closeNav" title="close side menu">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewbox="0 0 16 16" fill="none">
+                <path d="M15.6653 1.95098C16.1116 1.50467 16.1116 0.781049 15.6653 0.334735C15.219 -0.111578 14.4953 -0.111578 14.049 0.334735L8 6.38376L1.95098 0.334735C1.50467 -0.111578 0.781049 -0.111578 0.334735 0.334735C-0.111578 0.781049 -0.111578 1.50467 0.334735 1.95098L6.38376 8L0.334735 14.049C-0.111578 14.4953 -0.111578 15.219 0.334735 15.6653C0.781049 16.1116 1.50467 16.1116 1.95098 15.6653L8 9.61624L14.049 15.6653C14.4953 16.1116 15.219 16.1116 15.6653 15.6653C16.1116 15.219 16.1116 14.4953 15.6653 14.049L9.61624 8L15.6653 1.95098Z" fill="#868684"></path>
+            </svg>
+        </button>
+
+        <a id="headerLogo" href="index.html" title="homepage">
+            <img src="static/image/logo.svg" style="width: auto; height: 60px; vertical-align: middle;" alt="Pet Creations Art Logo">
+
+        </a>
+
+        <nav id="headerNav">
+            
+                <div class="headerNavLink">
+                    
+                        <a class="headerNavLinkTitle" href="personalised-custom-cartoon-pet-canvas.html">Shop Now</a>
+                    
+                </div>
+            
+                <div class="headerNavLink">
+                    
+                        <a class="headerNavLinkTitle" href="contact-us-customer-reviews.html">Reviews</a>
+                    
+                </div>
+            
+                <div class="headerNavLink">
+                    
+                        <a class="headerNavLinkTitle" href="f-a-q.html">FAQ</a>
+                    
+                </div>
+            
+                <div class="headerNavLink">
+                    
+                        <a class="headerNavLinkTitle" href="contact-us.html">Help</a>
+                    
+                </div>
+            
+        </nav>
+
+        <div id="headerIcons">
+
+            <button id="headerIconsCart" class="openCart" data-count="0" title="cart" style="display:none">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewbox="0 0 24 24" fill="none">
+                    <g clip-path="url(#clip0_10877_750)">
+                        <path d="M0 1.5C0 2.32875 0.67146 3 1.50047 3H3.27102L5.54798 14.3812C5.96811 16.485 7.81744 18 9.96311 18H18.4033C20.639 17.9888 22.5333 16.35 22.8596 14.1375L23.985 6.21375C24.075 5.5875 23.7599 4.9725 23.201 4.67625C22.9684 4.55625 22.7096 4.5 22.4508 4.50375H6.63207L6.21569 2.415C5.93811 1.0125 4.70397 0 3.27102 0H1.50047C0.67146 0 0 0.67125 0 1.5ZM20.7777 7.5L19.8812 13.7137C19.7724 14.4563 19.131 15.0075 18.3807 15H9.96311C9.24664 15 8.63145 14.4937 8.49265 13.7925L7.23226 7.5H20.7777Z" fill="#868684"></path>
+                        <path d="M20.2556 24C21.4983 24 22.5056 22.9926 22.5056 21.75C22.5056 20.5074 21.4983 19.5 20.2556 19.5C19.013 19.5 18.0056 20.5074 18.0056 21.75C18.0056 22.9926 19.013 24 20.2556 24Z" fill="#868684"></path>
+                        <path d="M8.25187 24C9.49452 24 10.5019 22.9926 10.5019 21.75C10.5019 20.5074 9.49452 19.5 8.25187 19.5C7.00923 19.5 6.00188 20.5074 6.00188 21.75C6.00188 22.9926 7.00923 24 8.25187 24Z" fill="#868684"></path>
+                    </g>
+                    <defs>
+                        <clippath id="clip0_10877_750">
+                            <rect width="24" height="24" fill="white"></rect>
+                        </clippath>
+                    </defs>
+                </svg>
+            </button>
+        </div>
+    </div>
+
+    <div id="slider">
+        <div id="sliderContent">
+            <div id="sliderBlocks" style="display: none;">                   
+                        <a class="sliderBlocksItem" id="image_link_bHBKC7" href="">
+                            <img class="sliderBlocksItemImage" src="static/picture/custom-cartoon-pet-canvas_c106f17b-2691-40b1-83e2-66a0088cd077.png" alt="" loading="lazy">
+                            <div class="sliderBlocksItemText">Pet Canvas</div>
+                        </a>
+     
+                        <a class="sliderBlocksItem" id="image_link_caaNQC" href="custom-cartoon-style-pet-fleece-blanket.html">
+                            <img class="sliderBlocksItemImage" src="static/picture/pet-blanket-custom_2.png" alt="" loading="lazy">
+                            <div class="sliderBlocksItemText">Fleece Blanket</div>
+                        </a>
+ 
+                        <a class="sliderBlocksItem" id="image_link_A6UpX8" href="custom-cartoon-pet-coffee-mug.html">
+                            <img class="sliderBlocksItemImage" src="static/picture/custom-pet-mug_f3121d8b-4910-4218-a36c-bc93c66c468d.png" alt="" loading="lazy">
+                            <div class="sliderBlocksItemText">Coffee Mug</div>
+                        </a>
+
+                        <a class="sliderBlocksItem" id="image_link_kBAJCg" href="pet-creations-gift-bundles.html">
+                            <img class="sliderBlocksItemImage" src="static/picture/gift-set_446315b4-7814-4bc2-a2b9-d216ae835fa0.png" alt="" loading="lazy">
+                            <div class="sliderBlocksItemText">Gift Bundles</div>
+                        </a>             
+            </div>
+            <nav id="sliderNav">
+                    
+                        <a class="sliderNavLink" href="contact-us-how-it-works.html">
+                            <img class="sliderNavLinkIcon" src="static/picture/IconContainer.svg" alt="" loading="lazy">
+                            <div class="sliderNavLinkTitle">How it Works</div>
+                            <svg class="sliderNavLinkArrow" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewbox="0 0 16 16" fill="none">
+                                <path d="M9.73147 3.65549C9.30479 3.22733 8.6128 3.22459 8.18338 3.65549C8.13689 3.70215 8.09312 3.7543 8.05757 3.80644C7.75944 4.26753 7.83055 4.87683 8.22715 5.25559L9.86822 6.90234H3.76068C3.15621 6.90234 2.66663 7.39362 2.66663 8.00018C2.66663 8.60673 3.15621 9.09801 3.76068 9.09801H9.87096L8.20253 10.7722C7.82508 11.14 7.7567 11.7218 8.03842 12.1665C8.36664 12.6742 9.04495 12.8197 9.55095 12.4903C9.61659 12.4492 9.67676 12.3998 9.73147 12.3449L12.8194 9.24348C13.5032 8.55733 13.5059 7.44303 12.8194 6.75413L9.73147 3.65549Z" fill="#00313C"></path>
+                            </svg>
+                        </a>
+                    
+                        <a class="sliderNavLink" href="f-a-q.html">
+                            <img class="sliderNavLinkIcon" src="static/picture/IconContainer_1.svg" alt="" loading="lazy">
+                            <div class="sliderNavLinkTitle">FAQS</div>
+                            <svg class="sliderNavLinkArrow" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewbox="0 0 16 16" fill="none">
+                                <path d="M9.73147 3.65549C9.30479 3.22733 8.6128 3.22459 8.18338 3.65549C8.13689 3.70215 8.09312 3.7543 8.05757 3.80644C7.75944 4.26753 7.83055 4.87683 8.22715 5.25559L9.86822 6.90234H3.76068C3.15621 6.90234 2.66663 7.39362 2.66663 8.00018C2.66663 8.60673 3.15621 9.09801 3.76068 9.09801H9.87096L8.20253 10.7722C7.82508 11.14 7.7567 11.7218 8.03842 12.1665C8.36664 12.6742 9.04495 12.8197 9.55095 12.4903C9.61659 12.4492 9.67676 12.3998 9.73147 12.3449L12.8194 9.24348C13.5032 8.55733 13.5059 7.44303 12.8194 6.75413L9.73147 3.65549Z" fill="#00313C"></path>
+                            </svg>
+                        </a>
+                    
+                        <a class="sliderNavLink" href="order-status.php">
+                            <img class="sliderNavLinkIcon" src="static/picture/new-status2.png" alt="" loading="lazy">
+                            <div class="sliderNavLinkTitle">Order Status</div>
+                            <svg class="sliderNavLinkArrow" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewbox="0 0 16 16" fill="none">
+                                <path d="M9.73147 3.65549C9.30479 3.22733 8.6128 3.22459 8.18338 3.65549C8.13689 3.70215 8.09312 3.7543 8.05757 3.80644C7.75944 4.26753 7.83055 4.87683 8.22715 5.25559L9.86822 6.90234H3.76068C3.15621 6.90234 2.66663 7.39362 2.66663 8.00018C2.66663 8.60673 3.15621 9.09801 3.76068 9.09801H9.87096L8.20253 10.7722C7.82508 11.14 7.7567 11.7218 8.03842 12.1665C8.36664 12.6742 9.04495 12.8197 9.55095 12.4903C9.61659 12.4492 9.67676 12.3998 9.73147 12.3449L12.8194 9.24348C13.5032 8.55733 13.5059 7.44303 12.8194 6.75413L9.73147 3.65549Z" fill="#00313C"></path>
+                            </svg>
+                        </a>
+                                    
+            </nav>
+
+            
+    <a href="" class="button sliderNavButton ">
+        Get Your Artwork
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewbox="0 0 20 20" fill="none">
+            <path d="M12.1644 4.56937C11.6311 4.03418 10.7661 4.03075 10.2293 4.56937C10.1712 4.62769 10.1165 4.69288 10.0721 4.75806C9.69939 5.33443 9.78828 6.09605 10.284 6.56949L12.3354 8.62793H4.70094C3.94536 8.62793 3.33337 9.24204 3.33337 10.0002C3.33337 10.7584 3.94536 11.3725 4.70094 11.3725H12.3388L10.2533 13.4653C9.78144 13.925 9.69597 14.6523 10.0481 15.2081C10.4584 15.8428 11.3063 16.0246 11.9388 15.6129C12.0208 15.5615 12.096 15.4997 12.1644 15.4311L16.0244 11.5544C16.8791 10.6967 16.8825 9.30379 16.0244 8.44267L12.1644 4.56937Z" fill="white"></path>
+        </svg>
+    </a>
+            <div id="sliderNavGuarantees">                    
+                        <div class="sliderNavGuaranteesItem">
+                            <img class="sliderNavGuaranteeItemImage" src="static/picture/IconContainer_2.svg" alt="" loading="lazy">
+                            <div class="sliderNavGuaranteeItemText">Fast Shipping</div>
+                        </div>
+                    
+                        <div class="sliderNavGuaranteesItem">
+                            <img class="sliderNavGuaranteeItemImage" src="static/picture/IconContainer_3.svg" alt="" loading="lazy">
+                            <div class="sliderNavGuaranteeItemText">Multiple Free Revisions</div>
+                        </div>
+                    
+                        <div class="sliderNavGuaranteesItem">
+                            <img class="sliderNavGuaranteeItemImage" src="static/picture/IconContainer_4.svg" alt="" loading="lazy">
+                            <div class="sliderNavGuaranteeItemText">100% Money Back Guarantee</div>
+                        </div>                    
+            </div>
+        </div>
+    </div>
+</header>
+
+
+</div>
+    <div id="shopify-section-theme-mini-cart" class="shopify-section"><dialog id="miniCart">
+    <div id="miniCartExit" class="closeCart">
+    </div>
+    <div id="miniCartContent">
+        <div id="miniCartContentExit" class="closeCart">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewbox="0 0 24 24" fill="none">
+                <path d="M18.7071 6.70711C19.0976 6.31658 19.0976 5.68342 18.7071 5.29289C18.3166 4.90237 17.6834 4.90237 17.2929 5.29289L12 10.5858L6.70711 5.29289C6.31658 4.90237 5.68342 4.90237 5.29289 5.29289C4.90237 5.68342 4.90237 6.31658 5.29289 6.70711L10.5858 12L5.29289 17.2929C4.90237 17.6834 4.90237 18.3166 5.29289 18.7071C5.68342 19.0976 6.31658 19.0976 6.70711 18.7071L12 13.4142L17.2929 18.7071C17.6834 19.0976 18.3166 19.0976 18.7071 18.7071C19.0976 18.3166 19.0976 17.6834 18.7071 17.2929L13.4142 12L18.7071 6.70711Z" fill="#252523"></path>
+            </svg>
+        </div>
+        
+        <div id="miniCartEmpty">
+            <div id="miniCartEmptyTitle">Your Cart is Empty</div>
+            
+                <div id="miniCartEmptySubtitle">Shop now to get the pet lover in your life the cutest gift!</div>
+            
+            <div id="miniCartEmptyProducts">
+                    
+                        <a class="miniCartEmptyProductsItem" id="products_CkQiRf" href="">
+                            <div class="miniCartEmptyProductsItemImage">
+                                <img class="miniCartEmptyProductsItemImageActual" src="static/picture/img-menu-01_1.png" alt="" loading="lazy">
+                            </div>
+                            <div class="miniCartEmptyProductsItemText">Pet Canvas</div>
+                        </a>
+                    
+                        <a class="miniCartEmptyProductsItem" id="products_hzMBpW" href="custom-cartoon-style-pet-fleece-blanket.html">
+                            <div class="miniCartEmptyProductsItemImage">
+                                <img class="miniCartEmptyProductsItemImageActual" src="static/picture/custom-pet-fleece-blanket_60164be3-d58c-401b-b367-dc272a8589bc_800x_1.png" alt="" loading="lazy">
+                            </div>
+                            <div class="miniCartEmptyProductsItemText">Fleece Blanket</div>
+                        </a>
+                    
+                        <a class="miniCartEmptyProductsItem" id="products_EPEwYt" href="custom-cartoon-pet-coffee-mug.html">
+                            <div class="miniCartEmptyProductsItemImage">
+                                <img class="miniCartEmptyProductsItemImageActual" src="static/picture/Group_1000006873.png" alt="" loading="lazy">
+                            </div>
+                            <div class="miniCartEmptyProductsItemText">Coffee Mug</div>
+                        </a>
+                    
+                        <a class="miniCartEmptyProductsItem" id="products_g6PEWx" href="pet-creations-gift-bundles.html">
+                            <div class="miniCartEmptyProductsItemImage">
+                                <img class="miniCartEmptyProductsItemImageActual" src="static/picture/4-deluxegiftset_2000x_1_1.png" alt="" loading="lazy">
+                            </div>
+                            <div class="miniCartEmptyProductsItemText">Gift Bundles</div>
+                        </a>                    
+            </div>
+      
+    <a href="" class="button miniCartEmptyButton ">
+        Get Your Artwork
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewbox="0 0 20 20" fill="none">
+            <path d="M12.1644 4.56937C11.6311 4.03418 10.7661 4.03075 10.2293 4.56937C10.1712 4.62769 10.1165 4.69288 10.0721 4.75806C9.69939 5.33443 9.78828 6.09605 10.284 6.56949L12.3354 8.62793H4.70094C3.94536 8.62793 3.33337 9.24204 3.33337 10.0002C3.33337 10.7584 3.94536 11.3725 4.70094 11.3725H12.3388L10.2533 13.4653C9.78144 13.925 9.69597 14.6523 10.0481 15.2081C10.4584 15.8428 11.3063 16.0246 11.9388 15.6129C12.0208 15.5615 12.096 15.4997 12.1644 15.4311L16.0244 11.5544C16.8791 10.6967 16.8825 9.30379 16.0244 8.44267L12.1644 4.56937Z" fill="white"></path>
+        </svg>
+    </a>
+        </div>
+
+        <div id="miniCartHeader">
+            <div id="miniCartHeaderTitle">Your Cart (0)</div>
+            
+                <div id="miniCartHeaderShipping"><p>Order Now For FREE Shipping (5-7 days)</p></div>
+                <div id="miniCartHeaderBar">
+                    <div id="miniCartHeaderBarInner"></div>
+                    <svg width="32" height="33" viewbox="0 0 32 33" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect y="0.638672" width="32" height="32" rx="16" fill="#2677CB"></rect>
+    <path d="M20.6079 9.76369C20.3273 9.41139 19.9706 9.12719 19.5646 8.93236C19.1586 8.73753 18.7137 8.63713 18.2634 8.63869H8.22804V10.6387H15.7264V14.1387C15.7264 14.5365 15.8844 14.918 16.1657 15.1993C16.4469 15.4806 16.8284 15.6387 17.2261 15.6387H22.225V18.8137C21.8542 18.6807 21.4608 18.6225 21.0674 18.6424C20.674 18.6623 20.2885 18.7599 19.9329 18.9296C19.5774 19.0992 19.259 19.3376 18.9961 19.6309C18.7331 19.9243 18.5308 20.2668 18.4009 20.6387H14.0518C13.8159 19.9715 13.3519 19.4091 12.7416 19.051C12.1313 18.693 11.4141 18.5622 10.7168 18.6819C10.0194 18.8016 9.38682 19.1639 8.93078 19.705C8.47474 20.2461 8.22461 20.931 8.22461 21.6387C8.22461 22.3464 8.47474 23.0313 8.93078 23.5723C9.38682 24.1134 10.0194 24.4758 10.7168 24.5955C11.4141 24.7151 12.1313 24.5844 12.7416 24.2263C13.3519 23.8682 13.8159 23.3059 14.0518 22.6387H18.4009C18.6384 23.3035 19.1027 23.8632 19.7122 24.2193C20.3216 24.5755 21.0371 24.7053 21.7328 24.5858C22.4284 24.4664 23.0597 24.1053 23.5155 23.5663C23.9712 23.0272 24.2224 22.3447 24.2246 21.6387V15.3412C24.2248 14.6596 23.9929 13.9984 23.5673 13.4662L20.6079 9.76369ZM17.726 10.6387H18.2634C18.4132 10.6388 18.561 10.6725 18.696 10.7374C18.8309 10.8023 18.9496 10.8967 19.0432 11.0137L21.1453 13.6387H17.726V10.6387ZM11.2274 22.6387C11.0297 22.6387 10.8364 22.58 10.6719 22.4701C10.5075 22.3603 10.3794 22.2041 10.3037 22.0214C10.228 21.8386 10.2082 21.6376 10.2468 21.4436C10.2854 21.2496 10.3806 21.0714 10.5204 20.9316C10.6603 20.7917 10.8384 20.6965 11.0323 20.6579C11.2263 20.6193 11.4273 20.6391 11.61 20.7148C11.7927 20.7905 11.9488 20.9187 12.0587 21.0831C12.1685 21.2476 12.2272 21.4409 12.2272 21.6387C12.2272 21.9039 12.1218 22.1582 11.9343 22.3458C11.7469 22.5333 11.4926 22.6387 11.2274 22.6387ZM21.2253 22.6387C21.0275 22.6387 20.8342 22.58 20.6698 22.4701C20.5054 22.3603 20.3772 22.2041 20.3016 22.0214C20.2259 21.8386 20.2061 21.6376 20.2447 21.4436C20.2833 21.2496 20.3785 21.0714 20.5183 20.9316C20.6581 20.7917 20.8363 20.6965 21.0302 20.6579C21.2241 20.6193 21.4252 20.6391 21.6079 20.7148C21.7905 20.7905 21.9467 20.9187 22.0565 21.0831C22.1664 21.2476 22.225 21.4409 22.225 21.6387C22.225 21.9039 22.1197 22.1582 21.9322 22.3458C21.7447 22.5333 21.4904 22.6387 21.2253 22.6387Z" fill="#F2F7FC"></path>
+    <path d="M14.2266 12.1387H8.22786V14.1387H14.2266V12.1387Z" fill="#F2F7FC"></path>
+    <path d="M11.7271 15.6387H8.22786V17.6387H11.7271V15.6387Z" fill="#F2F7FC"></path>
+</svg>
+
+                </div>
+            
+        </div>
+
+        <div id="miniCartBody" class="active"></div>
+        <div id="miniCartUpsell">
+                
+                    <div class="miniCartUpsellItem" data-product="8277401796826" data-variant="44745614524634">
+                        <img class="miniCartUpsellItemImage" src="static/picture/IconContainer_cf82278e-36db-4b74-89f2-14e58209783c.svg" alt="" loading="lazy">
+                        <div class="miniCartUpsellItemCenter">
+                            
+                                <div class="miniCartUpsellItemCenterTitle">Skip Order Queue</div>
+                            
+                            <div class="miniCartUpsellItemCenterPrice">$79</div>
+                        </div>
+                        <button class="miniCartUpsellItemButton">
+                            <div class="miniCartUpsellItemButtonIndicator"></div>
+                        </button>
+                    </div>
+                
+                    <div class="miniCartUpsellItem" data-product="7427104899290" data-variant="41972948533466">
+                        <img class="miniCartUpsellItemImage" src="static/picture/IconContainer_2_8be5b332-0c2c-41fc-b151-d6855b61acbb.svg" alt="" loading="lazy">
+                        <div class="miniCartUpsellItemCenter">
+                            
+                                <div class="miniCartUpsellItemCenterTitle">Add Digital Download</div>
+                            
+                            <div class="miniCartUpsellItemCenterPrice">$79</div>
+                        </div>
+                        <button class="miniCartUpsellItemButton">
+                            <div class="miniCartUpsellItemButtonIndicator"></div>
+                        </button>
+                    </div>
+                
+        </div>
+  
+        <div id="miniCartFooter">
+            <div id="miniCartFooterShipping">Shipping <span>FREE</span></div>
+            <div id="miniCartFooterSubtotal">
+                <div id="miniCartFooterSubtotalTitle">Total</div>
+                <span id="miniCartFooterCheckoutPrice"></span>
+            </div>
+
+            <button id="miniCartFooterCheckout" class="button">
+                <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" id="Layer_1" x="0px" y="0px" viewbox="0 0 700 700" xml:space="preserve">
+                    <g>
+                        <path class="st0" d="M551,262.1h-19.1v-93.3c0-84.8-69.2-154-154-154h-56.5c-84.8,0-154,69.2-154,154v92.5h-19.1   c-38.1,0-68.5,31.1-68.5,68.5v286.8c0,38.1,31.1,68.5,68.5,68.5h403.4c38.1,0,68.5-31.1,68.5-68.5l0-286.1   C620.2,292.4,589.1,262,551,262.1L551,262.1z M375.1,498v77.7c0,4.2-2.8,7.1-7.1,7.1h-36c-4.2,0-7.1-2.8-7.1-7.1V498   c0-2.8-1.4-4.9-4.2-6.4c-23.3-11.3-38.9-35.3-37.4-62.9c1.4-34.6,30.4-62.9,65-63.6c38.1-1.4,69.2,29,69.2,67.1   c0,26.1-15.5,49.4-37.4,60C376.5,493.1,375.1,495.2,375.1,498L375.1,498z M439.4,262.1H259.9v-93.3c0-33.9,27.6-61.5,61.5-61.5   h56.5c33.9,0,61.5,27.6,61.5,61.5L439.4,262.1z"></path>
+                    </g>
+                </svg>
+                Secure Checkout
+            </button>
+
+            <div id="miniCartFooterPayments">
+                
+                    <svg class="miniCartFooterPaymentsItem" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="pi-american_express" viewbox="0 0 38 24" width="38" height="24"><title id="pi-american_express">American Express</title><path fill="#000" d="M35 0H3C1.3 0 0 1.3 0 3v18c0 1.7 1.4 3 3 3h32c1.7 0 3-1.3 3-3V3c0-1.7-1.4-3-3-3Z" opacity=".07"></path><path fill="#006FCF" d="M35 1c1.1 0 2 .9 2 2v18c0 1.1-.9 2-2 2H3c-1.1 0-2-.9-2-2V3c0-1.1.9-2 2-2h32Z"></path><path fill="#FFF" d="M22.012 19.936v-8.421L37 11.528v2.326l-1.732 1.852L37 17.573v2.375h-2.766l-1.47-1.622-1.46 1.628-9.292-.02Z"></path><path fill="#006FCF" d="M23.013 19.012v-6.57h5.572v1.513h-3.768v1.028h3.678v1.488h-3.678v1.01h3.768v1.531h-5.572Z"></path><path fill="#006FCF" d="m28.557 19.012 3.083-3.289-3.083-3.282h2.386l1.884 2.083 1.89-2.082H37v.051l-3.017 3.23L37 18.92v.093h-2.307l-1.917-2.103-1.898 2.104h-2.321Z"></path><path fill="#FFF" d="M22.71 4.04h3.614l1.269 2.881V4.04h4.46l.77 2.159.771-2.159H37v8.421H19l3.71-8.421Z"></path><path fill="#006FCF" d="m23.395 4.955-2.916 6.566h2l.55-1.315h2.98l.55 1.315h2.05l-2.904-6.566h-2.31Zm.25 3.777.875-2.09.873 2.09h-1.748Z"></path><path fill="#006FCF" d="M28.581 11.52V4.953l2.811.01L32.84 9l1.456-4.046H37v6.565l-1.74.016v-4.51l-1.644 4.494h-1.59L30.35 7.01v4.51h-1.768Z"></path></svg>
+
+                
+                    <svg class="miniCartFooterPaymentsItem" version="1.1" xmlns="http://www.w3.org/2000/svg" role="img" x="0" y="0" width="38" height="24" viewbox="0 0 165.521 105.965" xml:space="preserve" aria-labelledby="pi-apple_pay"><title id="pi-apple_pay">Apple Pay</title><path fill="#000" d="M150.698 0H14.823c-.566 0-1.133 0-1.698.003-.477.004-.953.009-1.43.022-1.039.028-2.087.09-3.113.274a10.51 10.51 0 0 0-2.958.975 9.932 9.932 0 0 0-4.35 4.35 10.463 10.463 0 0 0-.975 2.96C.113 9.611.052 10.658.024 11.696a70.22 70.22 0 0 0-.022 1.43C0 13.69 0 14.256 0 14.823v76.318c0 .567 0 1.132.002 1.699.003.476.009.953.022 1.43.028 1.036.09 2.084.275 3.11a10.46 10.46 0 0 0 .974 2.96 9.897 9.897 0 0 0 1.83 2.52 9.874 9.874 0 0 0 2.52 1.83c.947.483 1.917.79 2.96.977 1.025.183 2.073.245 3.112.273.477.011.953.017 1.43.02.565.004 1.132.004 1.698.004h135.875c.565 0 1.132 0 1.697-.004.476-.002.952-.009 1.431-.02 1.037-.028 2.085-.09 3.113-.273a10.478 10.478 0 0 0 2.958-.977 9.955 9.955 0 0 0 4.35-4.35c.483-.947.789-1.917.974-2.96.186-1.026.246-2.074.274-3.11.013-.477.02-.954.022-1.43.004-.567.004-1.132.004-1.699V14.824c0-.567 0-1.133-.004-1.699a63.067 63.067 0 0 0-.022-1.429c-.028-1.038-.088-2.085-.274-3.112a10.4 10.4 0 0 0-.974-2.96 9.94 9.94 0 0 0-4.35-4.35A10.52 10.52 0 0 0 156.939.3c-1.028-.185-2.076-.246-3.113-.274a71.417 71.417 0 0 0-1.431-.022C151.83 0 151.263 0 150.698 0z"></path><path fill="#FFF" d="M150.698 3.532l1.672.003c.452.003.905.008 1.36.02.793.022 1.719.065 2.583.22.75.135 1.38.34 1.984.648a6.392 6.392 0 0 1 2.804 2.807c.306.6.51 1.226.645 1.983.154.854.197 1.783.218 2.58.013.45.019.9.02 1.36.005.557.005 1.113.005 1.671v76.318c0 .558 0 1.114-.004 1.682-.002.45-.008.9-.02 1.35-.022.796-.065 1.725-.221 2.589a6.855 6.855 0 0 1-.645 1.975 6.397 6.397 0 0 1-2.808 2.807c-.6.306-1.228.511-1.971.645-.881.157-1.847.2-2.574.22-.457.01-.912.017-1.379.019-.555.004-1.113.004-1.669.004H14.801c-.55 0-1.1 0-1.66-.004a74.993 74.993 0 0 1-1.35-.018c-.744-.02-1.71-.064-2.584-.22a6.938 6.938 0 0 1-1.986-.65 6.337 6.337 0 0 1-1.622-1.18 6.355 6.355 0 0 1-1.178-1.623 6.935 6.935 0 0 1-.646-1.985c-.156-.863-.2-1.788-.22-2.578a66.088 66.088 0 0 1-.02-1.355l-.003-1.327V14.474l.002-1.325a66.7 66.7 0 0 1 .02-1.357c.022-.792.065-1.717.222-2.587a6.924 6.924 0 0 1 .646-1.981c.304-.598.7-1.144 1.18-1.623a6.386 6.386 0 0 1 1.624-1.18 6.96 6.96 0 0 1 1.98-.646c.865-.155 1.792-.198 2.586-.22.452-.012.905-.017 1.354-.02l1.677-.003h135.875"></path><g><g><path fill="#000" d="M43.508 35.77c1.404-1.755 2.356-4.112 2.105-6.52-2.054.102-4.56 1.355-6.012 3.112-1.303 1.504-2.456 3.959-2.156 6.266 2.306.2 4.61-1.152 6.063-2.858"></path><path fill="#000" d="M45.587 39.079c-3.35-.2-6.196 1.9-7.795 1.9-1.6 0-4.049-1.8-6.698-1.751-3.447.05-6.645 2-8.395 5.1-3.598 6.2-.95 15.4 2.55 20.45 1.699 2.5 3.747 5.25 6.445 5.151 2.55-.1 3.549-1.65 6.647-1.65 3.097 0 3.997 1.65 6.696 1.6 2.798-.05 4.548-2.5 6.247-5 1.95-2.85 2.747-5.6 2.797-5.75-.05-.05-5.396-2.101-5.446-8.251-.05-5.15 4.198-7.6 4.398-7.751-2.399-3.548-6.147-3.948-7.447-4.048"></path></g><g><path fill="#000" d="M78.973 32.11c7.278 0 12.347 5.017 12.347 12.321 0 7.33-5.173 12.373-12.529 12.373h-8.058V69.62h-5.822V32.11h14.062zm-8.24 19.807h6.68c5.07 0 7.954-2.729 7.954-7.46 0-4.73-2.885-7.434-7.928-7.434h-6.706v14.894z"></path><path fill="#000" d="M92.764 61.847c0-4.809 3.665-7.564 10.423-7.98l7.252-.442v-2.08c0-3.04-2.001-4.704-5.562-4.704-2.938 0-5.07 1.507-5.51 3.82h-5.252c.157-4.86 4.731-8.395 10.918-8.395 6.654 0 10.995 3.483 10.995 8.89v18.663h-5.38v-4.497h-.13c-1.534 2.937-4.914 4.782-8.579 4.782-5.406 0-9.175-3.222-9.175-8.057zm17.675-2.417v-2.106l-6.472.416c-3.64.234-5.536 1.585-5.536 3.95 0 2.288 1.975 3.77 5.068 3.77 3.95 0 6.94-2.522 6.94-6.03z"></path><path fill="#000" d="M120.975 79.652v-4.496c.364.051 1.247.103 1.715.103 2.573 0 4.029-1.09 4.913-3.899l.52-1.663-9.852-27.293h6.082l6.863 22.146h.13l6.862-22.146h5.927l-10.216 28.67c-2.34 6.577-5.017 8.735-10.683 8.735-.442 0-1.872-.052-2.261-.157z"></path></g></g></svg>
+
+                
+                    <svg class="miniCartFooterPaymentsItem" viewbox="0 0 38 24" xmlns="http://www.w3.org/2000/svg" role="img" width="38" height="24" aria-labelledby="pi-diners_club"><title id="pi-diners_club">Diners Club</title><path opacity=".07" d="M35 0H3C1.3 0 0 1.3 0 3v18c0 1.7 1.4 3 3 3h32c1.7 0 3-1.3 3-3V3c0-1.7-1.4-3-3-3z"></path><path fill="#fff" d="M35 1c1.1 0 2 .9 2 2v18c0 1.1-.9 2-2 2H3c-1.1 0-2-.9-2-2V3c0-1.1.9-2 2-2h32"></path><path d="M12 12v3.7c0 .3-.2.3-.5.2-1.9-.8-3-3.3-2.3-5.4.4-1.1 1.2-2 2.3-2.4.4-.2.5-.1.5.2V12zm2 0V8.3c0-.3 0-.3.3-.2 2.1.8 3.2 3.3 2.4 5.4-.4 1.1-1.2 2-2.3 2.4-.4.2-.4.1-.4-.2V12zm7.2-7H13c3.8 0 6.8 3.1 6.8 7s-3 7-6.8 7h8.2c3.8 0 6.8-3.1 6.8-7s-3-7-6.8-7z" fill="#3086C8"></path></svg>
+                
+                    <svg class="miniCartFooterPaymentsItem" viewbox="0 0 38 24" width="38" height="24" role="img" aria-labelledby="pi-discover" fill="none" xmlns="http://www.w3.org/2000/svg"><title id="pi-discover">Discover</title><path fill="#000" opacity=".07" d="M35 0H3C1.3 0 0 1.3 0 3v18c0 1.7 1.4 3 3 3h32c1.7 0 3-1.3 3-3V3c0-1.7-1.4-3-3-3z"></path><path d="M35 1c1.1 0 2 .9 2 2v18c0 1.1-.9 2-2 2H3c-1.1 0-2-.9-2-2V3c0-1.1.9-2 2-2h32z" fill="#fff"></path><path d="M3.57 7.16H2v5.5h1.57c.83 0 1.43-.2 1.96-.63.63-.52 1-1.3 1-2.11-.01-1.63-1.22-2.76-2.96-2.76zm1.26 4.14c-.34.3-.77.44-1.47.44h-.29V8.1h.29c.69 0 1.11.12 1.47.44.37.33.59.84.59 1.37 0 .53-.22 1.06-.59 1.39zm2.19-4.14h1.07v5.5H7.02v-5.5zm3.69 2.11c-.64-.24-.83-.4-.83-.69 0-.35.34-.61.8-.61.32 0 .59.13.86.45l.56-.73c-.46-.4-1.01-.61-1.62-.61-.97 0-1.72.68-1.72 1.58 0 .76.35 1.15 1.35 1.51.42.15.63.25.74.31.21.14.32.34.32.57 0 .45-.35.78-.83.78-.51 0-.92-.26-1.17-.73l-.69.67c.49.73 1.09 1.05 1.9 1.05 1.11 0 1.9-.74 1.9-1.81.02-.89-.35-1.29-1.57-1.74zm1.92.65c0 1.62 1.27 2.87 2.9 2.87.46 0 .86-.09 1.34-.32v-1.26c-.43.43-.81.6-1.29.6-1.08 0-1.85-.78-1.85-1.9 0-1.06.79-1.89 1.8-1.89.51 0 .9.18 1.34.62V7.38c-.47-.24-.86-.34-1.32-.34-1.61 0-2.92 1.28-2.92 2.88zm12.76.94l-1.47-3.7h-1.17l2.33 5.64h.58l2.37-5.64h-1.16l-1.48 3.7zm3.13 1.8h3.04v-.93h-1.97v-1.48h1.9v-.93h-1.9V8.1h1.97v-.94h-3.04v5.5zm7.29-3.87c0-1.03-.71-1.62-1.95-1.62h-1.59v5.5h1.07v-2.21h.14l1.48 2.21h1.32l-1.73-2.32c.81-.17 1.26-.72 1.26-1.56zm-2.16.91h-.31V8.03h.33c.67 0 1.03.28 1.03.82 0 .55-.36.85-1.05.85z" fill="#231F20"></path><path d="M20.16 12.86a2.931 2.931 0 100-5.862 2.931 2.931 0 000 5.862z" fill="url(#pi-paint0_linear)"></path><path opacity=".65" d="M20.16 12.86a2.931 2.931 0 100-5.862 2.931 2.931 0 000 5.862z" fill="url(#pi-paint1_linear)"></path><path d="M36.57 7.506c0-.1-.07-.15-.18-.15h-.16v.48h.12v-.19l.14.19h.14l-.16-.2c.06-.01.1-.06.1-.13zm-.2.07h-.02v-.13h.02c.06 0 .09.02.09.06 0 .05-.03.07-.09.07z" fill="#231F20"></path><path d="M36.41 7.176c-.23 0-.42.19-.42.42 0 .23.19.42.42.42.23 0 .42-.19.42-.42 0-.23-.19-.42-.42-.42zm0 .77c-.18 0-.34-.15-.34-.35 0-.19.15-.35.34-.35.18 0 .33.16.33.35 0 .19-.15.35-.33.35z" fill="#231F20"></path><path d="M37 12.984S27.09 19.873 8.976 23h26.023a2 2 0 002-1.984l.024-3.02L37 12.985z" fill="#F48120"></path><defs><lineargradient id="pi-paint0_linear" x1="21.657" y1="12.275" x2="19.632" y2="9.104" gradientunits="userSpaceOnUse"><stop stop-color="#F89F20"></stop><stop offset=".25" stop-color="#F79A20"></stop><stop offset=".533" stop-color="#F68D20"></stop><stop offset=".62" stop-color="#F58720"></stop><stop offset=".723" stop-color="#F48120"></stop><stop offset="1" stop-color="#F37521"></stop></lineargradient><lineargradient id="pi-paint1_linear" x1="21.338" y1="12.232" x2="18.378" y2="6.446" gradientunits="userSpaceOnUse"><stop stop-color="#F58720"></stop><stop offset=".359" stop-color="#E16F27"></stop><stop offset=".703" stop-color="#D4602C"></stop><stop offset=".982" stop-color="#D05B2E"></stop></lineargradient></defs></svg>
+                
+                    <svg class="miniCartFooterPaymentsItem" xmlns="http://www.w3.org/2000/svg" role="img" viewbox="0 0 38 24" width="38" height="24" aria-labelledby="pi-google_pay"><title id="pi-google_pay">Google Pay</title><path d="M35 0H3C1.3 0 0 1.3 0 3v18c0 1.7 1.4 3 3 3h32c1.7 0 3-1.3 3-3V3c0-1.7-1.4-3-3-3z" fill="#000" opacity=".07"></path><path d="M35 1c1.1 0 2 .9 2 2v18c0 1.1-.9 2-2 2H3c-1.1 0-2-.9-2-2V3c0-1.1.9-2 2-2h32" fill="#FFF"></path><path d="M18.093 11.976v3.2h-1.018v-7.9h2.691a2.447 2.447 0 0 1 1.747.692 2.28 2.28 0 0 1 .11 3.224l-.11.116c-.47.447-1.098.69-1.747.674l-1.673-.006zm0-3.732v2.788h1.698c.377.012.741-.135 1.005-.404a1.391 1.391 0 0 0-1.005-2.354l-1.698-.03zm6.484 1.348c.65-.03 1.286.188 1.778.613.445.43.682 1.03.65 1.649v3.334h-.969v-.766h-.049a1.93 1.93 0 0 1-1.673.931 2.17 2.17 0 0 1-1.496-.533 1.667 1.667 0 0 1-.613-1.324 1.606 1.606 0 0 1 .613-1.336 2.746 2.746 0 0 1 1.698-.515c.517-.02 1.03.093 1.49.331v-.208a1.134 1.134 0 0 0-.417-.901 1.416 1.416 0 0 0-.98-.368 1.545 1.545 0 0 0-1.319.717l-.895-.564a2.488 2.488 0 0 1 2.182-1.06zM23.29 13.52a.79.79 0 0 0 .337.662c.223.176.5.269.785.263.429-.001.84-.17 1.146-.472.305-.286.478-.685.478-1.103a2.047 2.047 0 0 0-1.324-.374 1.716 1.716 0 0 0-1.03.294.883.883 0 0 0-.392.73zm9.286-3.75l-3.39 7.79h-1.048l1.281-2.728-2.224-5.062h1.103l1.612 3.885 1.569-3.885h1.097z" fill="#5F6368"></path><path d="M13.986 11.284c0-.308-.024-.616-.073-.92h-4.29v1.747h2.451a2.096 2.096 0 0 1-.9 1.373v1.134h1.464a4.433 4.433 0 0 0 1.348-3.334z" fill="#4285F4"></path><path d="M9.629 15.721a4.352 4.352 0 0 0 3.01-1.097l-1.466-1.14a2.752 2.752 0 0 1-4.094-1.44H5.577v1.17a4.53 4.53 0 0 0 4.052 2.507z" fill="#34A853"></path><path d="M7.079 12.05a2.709 2.709 0 0 1 0-1.735v-1.17H5.577a4.505 4.505 0 0 0 0 4.075l1.502-1.17z" fill="#FBBC04"></path><path d="M9.629 8.44a2.452 2.452 0 0 1 1.74.68l1.3-1.293a4.37 4.37 0 0 0-3.065-1.183 4.53 4.53 0 0 0-4.027 2.5l1.502 1.171a2.715 2.715 0 0 1 2.55-1.875z" fill="#EA4335"></path></svg>
+
+                
+                    <svg class="miniCartFooterPaymentsItem" viewbox="0 0 38 24" xmlns="http://www.w3.org/2000/svg" role="img" width="38" height="24" aria-labelledby="pi-master"><title id="pi-master">Mastercard</title><path opacity=".07" d="M35 0H3C1.3 0 0 1.3 0 3v18c0 1.7 1.4 3 3 3h32c1.7 0 3-1.3 3-3V3c0-1.7-1.4-3-3-3z"></path><path fill="#fff" d="M35 1c1.1 0 2 .9 2 2v18c0 1.1-.9 2-2 2H3c-1.1 0-2-.9-2-2V3c0-1.1.9-2 2-2h32"></path><circle fill="#EB001B" cx="15" cy="12" r="7"></circle><circle fill="#F79E1B" cx="23" cy="12" r="7"></circle><path fill="#FF5F00" d="M22 12c0-2.4-1.2-4.5-3-5.7-1.8 1.3-3 3.4-3 5.7s1.2 4.5 3 5.7c1.8-1.2 3-3.3 3-5.7z"></path></svg>
+                
+                    <svg class="miniCartFooterPaymentsItem" viewbox="0 0 38 24" xmlns="http://www.w3.org/2000/svg" width="38" height="24" role="img" aria-labelledby="pi-paypal"><title id="pi-paypal">PayPal</title><path opacity=".07" d="M35 0H3C1.3 0 0 1.3 0 3v18c0 1.7 1.4 3 3 3h32c1.7 0 3-1.3 3-3V3c0-1.7-1.4-3-3-3z"></path><path fill="#fff" d="M35 1c1.1 0 2 .9 2 2v18c0 1.1-.9 2-2 2H3c-1.1 0-2-.9-2-2V3c0-1.1.9-2 2-2h32"></path><path fill="#003087" d="M23.9 8.3c.2-1 0-1.7-.6-2.3-.6-.7-1.7-1-3.1-1h-4.1c-.3 0-.5.2-.6.5L14 15.6c0 .2.1.4.3.4H17l.4-3.4 1.8-2.2 4.7-2.1z"></path><path fill="#3086C8" d="M23.9 8.3l-.2.2c-.5 2.8-2.2 3.8-4.6 3.8H18c-.3 0-.5.2-.6.5l-.6 3.9-.2 1c0 .2.1.4.3.4H19c.3 0 .5-.2.5-.4v-.1l.4-2.4v-.1c0-.2.3-.4.5-.4h.3c2.1 0 3.7-.8 4.1-3.2.2-1 .1-1.8-.4-2.4-.1-.5-.3-.7-.5-.8z"></path><path fill="#012169" d="M23.3 8.1c-.1-.1-.2-.1-.3-.1-.1 0-.2 0-.3-.1-.3-.1-.7-.1-1.1-.1h-3c-.1 0-.2 0-.2.1-.2.1-.3.2-.3.4l-.7 4.4v.1c0-.3.3-.5.6-.5h1.3c2.5 0 4.1-1 4.6-3.8v-.2c-.1-.1-.3-.2-.5-.2h-.1z"></path></svg>
+                
+                    <svg class="miniCartFooterPaymentsItem" xmlns="http://www.w3.org/2000/svg" role="img" viewbox="0 0 38 24" width="38" height="24" aria-labelledby="pi-shopify_pay"><title id="pi-shopify_pay">Shop Pay</title><path opacity=".07" d="M35 0H3C1.3 0 0 1.3 0 3v18c0 1.7 1.4 3 3 3h32c1.7 0 3-1.3 3-3V3c0-1.7-1.4-3-3-3z" fill="#000"></path><path d="M35.889 0C37.05 0 38 .982 38 2.182v19.636c0 1.2-.95 2.182-2.111 2.182H2.11C.95 24 0 23.018 0 21.818V2.182C0 .982.95 0 2.111 0H35.89z" fill="#5A31F4"></path><path d="M9.35 11.368c-1.017-.223-1.47-.31-1.47-.705 0-.372.306-.558.92-.558.54 0 .934.238 1.225.704a.079.079 0 00.104.03l1.146-.584a.082.082 0 00.032-.114c-.475-.831-1.353-1.286-2.51-1.286-1.52 0-2.464.755-2.464 1.956 0 1.275 1.15 1.597 2.17 1.82 1.02.222 1.474.31 1.474.705 0 .396-.332.582-.993.582-.612 0-1.065-.282-1.34-.83a.08.08 0 00-.107-.035l-1.143.57a.083.083 0 00-.036.111c.454.92 1.384 1.437 2.627 1.437 1.583 0 2.539-.742 2.539-1.98s-1.155-1.598-2.173-1.82v-.003zM15.49 8.855c-.65 0-1.224.232-1.636.646a.04.04 0 01-.069-.03v-2.64a.08.08 0 00-.08-.081H12.27a.08.08 0 00-.08.082v8.194a.08.08 0 00.08.082h1.433a.08.08 0 00.081-.082v-3.594c0-.695.528-1.227 1.239-1.227.71 0 1.226.521 1.226 1.227v3.594a.08.08 0 00.081.082h1.433a.08.08 0 00.081-.082v-3.594c0-1.51-.981-2.577-2.355-2.577zM20.753 8.62c-.778 0-1.507.24-2.03.588a.082.082 0 00-.027.109l.632 1.088a.08.08 0 00.11.03 2.5 2.5 0 011.318-.366c1.25 0 2.17.891 2.17 2.068 0 1.003-.736 1.745-1.669 1.745-.76 0-1.288-.446-1.288-1.077 0-.361.152-.657.548-.866a.08.08 0 00.032-.113l-.596-1.018a.08.08 0 00-.098-.035c-.799.299-1.359 1.018-1.359 1.984 0 1.46 1.152 2.55 2.76 2.55 1.877 0 3.227-1.313 3.227-3.195 0-2.018-1.57-3.492-3.73-3.492zM28.675 8.843c-.724 0-1.373.27-1.845.746-.026.027-.069.007-.069-.029v-.572a.08.08 0 00-.08-.082h-1.397a.08.08 0 00-.08.082v8.182a.08.08 0 00.08.081h1.433a.08.08 0 00.081-.081v-2.683c0-.036.043-.054.069-.03a2.6 2.6 0 001.808.7c1.682 0 2.993-1.373 2.993-3.157s-1.313-3.157-2.993-3.157zm-.271 4.929c-.956 0-1.681-.768-1.681-1.783s.723-1.783 1.681-1.783c.958 0 1.68.755 1.68 1.783 0 1.027-.713 1.783-1.681 1.783h.001z" fill="#fff"></path></svg>
+
+                
+                    <svg class="miniCartFooterPaymentsItem" viewbox="0 0 38 24" width="38" height="24" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="pi-venmo"><title id="pi-venmo">Venmo</title><g fill="none" fill-rule="evenodd"><rect fill-opacity=".07" fill="#000" width="38" height="24" rx="3"></rect><path fill="#3D95CE" d="M35 1c1.1 0 2 .9 2 2v18c0 1.1-.9 2-2 2H3c-1.1 0-2-.9-2-2V3c0-1.1.9-2 2-2h32"></path><path d="M24.675 8.36c0 3.064-2.557 7.045-4.633 9.84h-4.74L13.4 6.57l4.151-.402 1.005 8.275c.94-1.566 2.099-4.025 2.099-5.702 0-.918-.154-1.543-.394-2.058l3.78-.783c.437.738.634 1.499.634 2.46z" fill="#FFF" fill-rule="nonzero"></path></g></svg>
+
+                
+                    <svg class="miniCartFooterPaymentsItem" viewbox="0 0 38 24" xmlns="http://www.w3.org/2000/svg" role="img" width="38" height="24" aria-labelledby="pi-visa"><title id="pi-visa">Visa</title><path opacity=".07" d="M35 0H3C1.3 0 0 1.3 0 3v18c0 1.7 1.4 3 3 3h32c1.7 0 3-1.3 3-3V3c0-1.7-1.4-3-3-3z"></path><path fill="#fff" d="M35 1c1.1 0 2 .9 2 2v18c0 1.1-.9 2-2 2H3c-1.1 0-2-.9-2-2V3c0-1.1.9-2 2-2h32"></path><path d="M28.3 10.1H28c-.4 1-.7 1.5-1 3h1.9c-.3-1.5-.3-2.2-.6-3zm2.9 5.9h-1.7c-.1 0-.1 0-.2-.1l-.2-.9-.1-.2h-2.4c-.1 0-.2 0-.2.2l-.3.9c0 .1-.1.1-.1.1h-2.1l.2-.5L27 8.7c0-.5.3-.7.8-.7h1.5c.1 0 .2 0 .2.2l1.4 6.5c.1.4.2.7.2 1.1.1.1.1.1.1.2zm-13.4-.3l.4-1.8c.1 0 .2.1.2.1.7.3 1.4.5 2.1.4.2 0 .5-.1.7-.2.5-.2.5-.7.1-1.1-.2-.2-.5-.3-.8-.5-.4-.2-.8-.4-1.1-.7-1.2-1-.8-2.4-.1-3.1.6-.4.9-.8 1.7-.8 1.2 0 2.5 0 3.1.2h.1c-.1.6-.2 1.1-.4 1.7-.5-.2-1-.4-1.5-.4-.3 0-.6 0-.9.1-.2 0-.3.1-.4.2-.2.2-.2.5 0 .7l.5.4c.4.2.8.4 1.1.6.5.3 1 .8 1.1 1.4.2.9-.1 1.7-.9 2.3-.5.4-.7.6-1.4.6-1.4 0-2.5.1-3.4-.2-.1.2-.1.2-.2.1zm-3.5.3c.1-.7.1-.7.2-1 .5-2.2 1-4.5 1.4-6.7.1-.2.1-.3.3-.3H18c-.2 1.2-.4 2.1-.7 3.2-.3 1.5-.6 3-1 4.5 0 .2-.1.2-.3.2M5 8.2c0-.1.2-.2.3-.2h3.4c.5 0 .9.3 1 .8l.9 4.4c0 .1 0 .1.1.2 0-.1.1-.1.1-.1l2.1-5.1c-.1-.1 0-.2.1-.2h2.1c0 .1 0 .1-.1.2l-3.1 7.3c-.1.2-.1.3-.2.4-.1.1-.3 0-.5 0H9.7c-.1 0-.2 0-.2-.2L7.9 9.5c-.2-.2-.5-.5-.9-.6-.6-.3-1.7-.5-1.9-.5L5 8.2z" fill="#142688"></path></svg>
+                
+            </div>
+
+        </div>
+
+    </div>
+</dialog>
+
+<!-- Extra Product Data For Cart -->
+
+
+
+</div>
+
+    <main>
+      <div id="shopify-section-template--18265728680154__main-product" class="shopify-section"><section id="product">
+    <div id="productVisual">
+
+        <div class="productVisualSwiper swiper">
+            <img id="productVisualSwiperImageOverlay" src="" alt="background image" loading="lazy">
+            <div class="swiper-wrapper">
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/custom-cartoon-pet-canvas_4e60585b-556d-4df5-9acd-fe3a1bc4d88d-1721939297_600.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+             
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/hand-drawn-art_9b8bc81b-c947-4404-aef8-77aa8b0f1664-1731746343_600.gif" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/v-22-1724731461_600.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/k-138522-1730218976_600.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/cartoo-poms-370330-1724584142_600.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/cartoon-canvas-22-1724665222_600.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/custom-cat-canvas_6a5c8168-f506-4d80-b164-aa5067bec453.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/custom-cartoon-family-couple-portrait.jpg" alt="custom family cartoon portrait">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/dog-canvas-753587.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/hamsters2.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/best-pet-portrait.jpg" alt="custom cartoon pet portrait">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/custom-pet-canvas-with-preview.jpg" alt="custom pug portrait">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/personalized-dog-portraits.jpg" alt="personalized pet canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/rabbit-canvas.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/cartoon-dog-canvas-portrait.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/1-2_f3df9fe9-54ae-4e47-a01a-d0a8097c4f7d.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/custom-cartoon-disney-style-pet-portrait.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/custom-cartoon-pet-canvas-lizard.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/personalized-cat-portraits.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/custom-cartoon-pet-portrait_c2edb3c3-1028-4313-b4a7-859047c00343.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/custom-cartoon-pet-portrait.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/petdisneyfication-510465.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/custom-pet-canvas_87d4d8ff-c39a-4385-9651-7ab2117e347a-286749.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/custom-pug-portrait.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/turn-your-pet-into-a-cartoon_160e3a02-22a0-461a-b14d-33063fb6d424.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/cartoon-pet-portraits-using-your-pet-photo.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/2_4aaeac31-7b3e-4a0e-b1c2-faf356816426.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/custom-pet-canvas-from-photo.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/personalized-disney-canvas.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/pet-canvas_458e632c-7c3d-4826-9233-16704fd756e5-602166.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/custom-hamster-portraits.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/gift-for-dog-lovers.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/cartoon2.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/ugn-387286.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+                    
+                            <div class="productVisualSwiperSlide swiper-slide">
+                                <img class="productVisualSwiperSlideImage" src="static/picture/cat-portrait-592864.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                            </div>
+                    
+                
+            </div>
+            <div class="prevEl">
+                <svg width="40" height="40" viewbox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect width="40" height="40" rx="20" fill="#F1F6FB"></rect>
+                    <path d="M10.9963 20.6479L11.0024 20.6552L11.009 20.6621L17.0532 26.9656C17.412 27.3398 17.9961 27.351 18.3457 26.9623C18.6959 26.5937 18.7052 26.0061 18.3396 25.6482L13.8219 20.9367H28.3368C28.8447 20.9367 29.25 20.4986 29.25 19.9951C29.25 19.4916 28.8447 19.0535 28.3368 19.0535H13.8408L18.3615 14.3389C18.7148 13.9704 18.7252 13.3802 18.3583 13.0213C18.1732 12.8302 17.9358 12.7501 17.7074 12.7501C17.4776 12.7501 17.2388 12.8311 17.0532 13.0246L11.009 19.3281L11.009 19.3281C10.8267 19.5183 10.75 19.7408 10.75 19.9951C10.75 20.2647 10.856 20.4771 10.9963 20.6479Z" fill="#859CA2" stroke="#859CA2" stroke-width="0.5"></path>
+                </svg>
+            </div>
+            <div class="nextEl">
+                <svg width="40" height="40" viewbox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect x="40" y="40" width="40" height="40" rx="20" transform="rotate(-180 40 40)" fill="#F1F6FB"></rect>
+                    <path d="M29.0037 19.3521L28.9976 19.3448L28.991 19.3379L22.9468 13.0344C22.588 12.6602 22.0039 12.649 21.6543 13.0377C21.3041 13.4063 21.2948 13.9939 21.6604 14.3518L26.1781 19.0633H11.6632C11.1553 19.0633 10.75 19.5014 10.75 20.0049C10.75 20.5084 11.1553 20.9465 11.6632 20.9465H26.1592L21.6385 25.6611C21.2852 26.0296 21.2748 26.6198 21.6417 26.9787C21.8268 27.1698 22.0642 27.2499 22.2926 27.2499C22.5224 27.2499 22.7612 27.1689 22.9468 26.9754L28.991 20.6719L28.991 20.6719C29.1733 20.4817 29.25 20.2592 29.25 20.0049C29.25 19.7353 29.144 19.5229 29.0037 19.3521Z" fill="#859CA2" stroke="#859CA2" stroke-width="0.5"></path>
+                </svg>
+            </div>
+        </div>
+
+        <div class="productVisualThumbs">
+            
+                
+                    <button class="productVisualThumbsSlide active" data-index="1">
+                        
+                        <img class="productVisualThumbsSlideImage" src="static/picture/custom-cartoon-pet-canvas_4e60585b-556d-4df5-9acd-fe3a1bc4d88d-1721939297_300.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                    </button>
+                
+            
+                
+                    <button class="productVisualThumbsSlide " data-index="2">
+                        
+                        <img class="productVisualThumbsSlideImage" src="static/picture/hand-drawn-art_9b8bc81b-c947-4404-aef8-77aa8b0f1664-1731746343_300.gif" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                    </button>
+                
+            
+                
+                    <button class="productVisualThumbsSlide " data-index="3">
+                        
+                        <img class="productVisualThumbsSlideImage" src="static/picture/v-22-1724731461_300.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                    </button>
+                
+            
+                
+                    <button class="productVisualThumbsSlide " data-index="4">
+                        
+                        <img class="productVisualThumbsSlideImage" src="static/picture/k-138522-1730218976_300.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                    </button>
+                
+            
+                
+                    <button class="productVisualThumbsSlide " data-index="5">
+                        
+                        <img class="productVisualThumbsSlideImage" src="static/picture/cartoo-poms-370330-1724584142_300.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                    </button>
+                
+            
+                
+                    <button class="productVisualThumbsSlide " data-index="6">
+                        
+                        <img class="productVisualThumbsSlideImage" src="static/picture/cartoon-canvas-22-1724665222_300.jpg" alt="Custom Cartoon Art Wrapped Pet Canvas">
+                    </button>
+                
+      
+        </div>
+
+    </div>
+<!------ modiby yi 2025  001slide.css --> 
+<link href="static/css/001slide.css" rel="stylesheet">
+<script src="static/js/001slide.js"></script>
+ 
+<!------ modiby yi 2025--> 
+
+    <div id="productContent">
+       <h2><B>Order ID: <?= urlencode($orderID) ?> </B></h2>
+       <h2><B>Amount: $<?= urlencode($amount) ?> USD</B></h2>
+
+
+
+
+    <h1 id="productTitle">PAYMENTS:</h1>
+           
+
+
+<div id="productOption">
+
+  <div id="productUpsells">
+    <div id="tab5"class="productOptionItem productOptionTrackItem productTrack-5 active">
+        <div class="productOptionItemLabel"> </div>
+        <div id="productUpsellsGroup">            
+                <div class="productUpsellsGroupItem" data-id="44745614524634">
+                    <img class="productUpsellsGroupItemImage" src="static/picture/faster3.png" style="visibility: hidden;" alt=""  loading="lazy">
+                    <div>                       
+
+                    <a href="pay.php?T=1&O=<?= urlencode($orderID) ?>&A=<?= urlencode($amount) ?>"   target="_blank">
+                        <button id="productATC">                    
+                            <span id="productATCText">Paypal</span>
+                            <span id="productATCAnimation">
+                                <svg id="productATCAnimationFirst" xmlns="http://www.w3.org/2000/svg" fill="#fff" width="24" height="24" viewbox="0 0 24 24">
+                                    <path d="M7.33 24l-2.83-2.829 9.339-9.175-9.339-9.167 2.83-2.829 12.17 11.996z"></path>
+                                </svg>
+                                <svg id="productATCAnimationSecond" xmlns="http://www.w3.org/2000/svg" fill="#fff" width="24" height="24" viewbox="0 0 24 24">
+                                    <path d="M7.33 24l-2.83-2.829 9.339-9.175-9.339-9.167 2.83-2.829 12.17 11.996z"></path>
+                                </svg>
+                            </span>                    
+                        </button>
+                    </a>      
+                        <div><p>.</p></div> 
+                        <a href="pay.php?T=2&O=<?= urlencode($orderID) ?>&A=<?= urlencode($amount) ?>"   target="_blank">    
+                        <button id="productATC">                    
+                            <span id="productATCText">Credit Card</span>
+                            <span id="productATCAnimation">
+                                <svg id="productATCAnimationFirst" xmlns="http://www.w3.org/2000/svg" fill="#fff" width="24" height="24" viewbox="0 0 24 24">
+                                    <path d="M7.33 24l-2.83-2.829 9.339-9.175-9.339-9.167 2.83-2.829 12.17 11.996z"></path>
+                                </svg>
+                                <svg id="productATCAnimationSecond" xmlns="http://www.w3.org/2000/svg" fill="#fff" width="24" height="24" viewbox="0 0 24 24">
+                                    <path d="M7.33 24l-2.83-2.829 9.339-9.175-9.339-9.167 2.83-2.829 12.17 11.996z"></path>
+                                </svg>
+                            </span>                    
+                        </button> 
+                        </a> 
+                        <div><p>.</p></div>
+                        <a href="pay.php?T=3&O=<?= urlencode($orderID) ?>&A=<?= urlencode($amount) ?>"   target="_blank">
+                        <button id="productATC">                    
+                            <span id="productATCText">Bank Transfer</span>
+                            <span id="productATCAnimation">
+                                <svg id="productATCAnimationFirst" xmlns="http://www.w3.org/2000/svg" fill="#fff" width="24" height="24" viewbox="0 0 24 24">
+                                    <path d="M7.33 24l-2.83-2.829 9.339-9.175-9.339-9.167 2.83-2.829 12.17 11.996z"></path>
+                                </svg>
+                                <svg id="productATCAnimationSecond" xmlns="http://www.w3.org/2000/svg" fill="#fff" width="24" height="24" viewbox="0 0 24 24">
+                                    <path d="M7.33 24l-2.83-2.829 9.339-9.175-9.339-9.167 2.83-2.829 12.17 11.996z"></path>
+                                </svg>
+                            </span>                    
+                        </button> 
+                        </a> 
+
+                    </div>
+                    <!-- <style>
+                        .payment-buttons {
+                            display: flex;
+                            justify-content: space-between;
+                            gap: 15px; /* 增加按钮之间的间距 */
+                            margin: 20px 0; /* 增加整体间距 */
+                        }
+
+                        .payment-button {
+                            flex: 1;
+                            padding: 15px 10px; /* 增加内边距 */
+                            text-align: center;
+                            border: 2px solid #fff; /* 添加边框 */
+                            border-radius: 8px; /* 增加圆角 */
+                            font-size: 16px;
+                            font-weight: bold; /* 增加字体粗细 */
+                            cursor: pointer;
+                            transition: all 0.3s ease; /* 平滑过渡效果 */
+                            text-decoration: none; /* 去掉链接的下划线 */
+                            color: white;
+                            position: relative; /* 用于定位伪元素 */
+                            overflow: hidden; /* 确保伪元素不溢出 */
+                        }
+
+                        .payment-button:before {
+                            content: '';
+                            position: absolute;
+                            top: 0;
+                            left: 0;
+                            right: 0;
+                            bottom: 0;
+                            background: rgba(255, 255, 255, 0.2); /* 添加半透明背景 */
+                            transform: translateY(-100%);
+                            transition: transform 0.3s ease;
+                        }
+
+                        .payment-button:hover:before {
+                            transform: translateY(0); /* 悬停时显示伪元素 */
+                        }
+
+                        .payment-button:hover {
+                            transform: translateY(-3px); /* 悬停时轻微上浮 */
+                            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2); /* 悬停时增加阴影 */
+                        }
+
+                        .payment-button:active {
+                            transform: translateY(1px); /* 按下时轻微下沉 */
+                            box-shadow: 0 5px 10px rgba(0, 0, 0, 0.2); /* 按下时减少阴影 */
+                        }
+
+                        .paypal {
+                            background-color: #009CDE; /* PayPal 的蓝色 */
+                            color: white;
+                        }
+
+                        .credit-card {
+                            background-color: #0078C8; /* 信用卡的蓝色 */
+                            color: white;
+                        }
+
+                        .bank-transfer {
+                            background-color: #00A651; /* 银行转账的绿色 */
+                            color: white;
+                        }
+                    </style>
+                    <div class="payment-buttons">
+                        <a href="pay.php?t=1" class="payment-button paypal" target="_blank">PayPal Online</a>
+                        <a href="pay.php?t=2" class="payment-button credit-card" target="_blank">Credit Card</a>
+                        <a href="pay.php?t=3" class="payment-button bank-transfer" target="_blank">Bank Transfer</a>
+                    </div> -->
+
+                     
+                        
+                     
+                </div>            
+        </div>
+
+ 
+
+    </div>
+</div>
+
+</div>
+
+
+
+
+
+        
+
+        <div id="productFreeShipping">Congrats! You've unlocked FREE SHIPPING</div>
+
+        <!-- <div id="productCycle">
+
+            
+            <button id="productATC">                    
+                <span id="productATCText">Complete Order</span>
+                <span id="productATCAnimation">
+                    <svg id="productATCAnimationFirst" xmlns="http://www.w3.org/2000/svg" fill="#fff" width="24" height="24" viewbox="0 0 24 24">
+                        <path d="M7.33 24l-2.83-2.829 9.339-9.175-9.339-9.167 2.83-2.829 12.17 11.996z"></path>
+                    </svg>
+                    <svg id="productATCAnimationSecond" xmlns="http://www.w3.org/2000/svg" fill="#fff" width="24" height="24" viewbox="0 0 24 24">
+                        <path d="M7.33 24l-2.83-2.829 9.339-9.175-9.339-9.167 2.83-2.829 12.17 11.996z"></path>
+                    </svg>
+                </span>                    
+            </button>            
+
+        </div> -->
+
+        <div id="productGuarantee">
+            
+                
+                    <div class="productGuaranteeItem first">
+                        <img class="productGuaranteeItemImage" src="static/picture/IconContainer_83f4ee9d-eb68-460a-b2b5-a9a058044cc4.svg" alt="" loading="lazy">
+                        <div class="productGuaranteeItemText">Artwork ready in 1-2 days</div>
+                    </div>
+                
+            
+                
+                    <div class="productGuaranteeItem col-2">
+                        <img class="productGuaranteeItemImage" src="static/picture/IconContainer_1_b367d6ec-1823-481c-bfde-1f77c76c392a.svg" alt="" loading="lazy">
+                        <div class="productGuaranteeItemText">Fast Shipping</div>
+                    </div>
+                
+            
+                
+                    <div class="productGuaranteeItem col-3">
+                        <img class="productGuaranteeItemImage" src="static/picture/IconContainer_2_949efc99-11ef-4faa-a37c-4768bb9098ad.svg" alt="" loading="lazy">
+                        <div class="productGuaranteeItemText">Multiple FREE <br>
+Revisions</div>
+                    </div>
+                
+            
+                
+                    <div class="productGuaranteeItem col-4">
+                        <img class="productGuaranteeItemImage" src="static/picture/IconContainer_3_40669d1f-24e8-45d4-aa5d-f023e7f07c06.svg" alt="" loading="lazy">
+                        <div class="productGuaranteeItemText">100% Money <br>
+Back Guarantee</div>
+                    </div>
+            
+        </div>
+
+        
+        <div id="productTabs">
+    <div id="productTabsSelect">
+        
+            <div class="productTabsSelectItem active" data-name="description">
+                <img class="productTabsSelectItemImage" src="static/picture/IconContainer_4_7f13a672-60eb-40fa-a645-e96fd90c5888.svg" alt="" loading="lazy">
+                <div class="productTabsSelectItemText">Description</div>
+            </div>
+        
+            <div class="productTabsSelectItem " data-name="shipping">
+                <img class="productTabsSelectItemImage" src="static/picture/IconContainer_5_74cb41ae-087d-491d-9a96-d84c65c5df1d.svg" alt="" loading="lazy">
+                <div class="productTabsSelectItemText">Shipping</div>
+            </div>
+        
+            <div class="productTabsSelectItem " data-name="guarantee">
+                <img class="productTabsSelectItemImage" src="static/picture/IconContainer_6_332c21c7-812a-41bc-82a9-c9d2185c0a0f.svg" alt="" loading="lazy">
+                <div class="productTabsSelectItemText">Guarantee</div>
+            </div>
+        
+        <div></div>
+    </div>
+    <div id="productTabsContent">
+        
+            <div class="productTabsContentItem rte active" data-name="description">
+                
+                    
+                        <p>What’s cuter than your pet? <strong>Your pet as a CARTOON!</strong><br><br>We will draw your custom artwork by hand with tender love, care, and attention. We will capture your pet's personality and facial expression, turning them into an incredible masterpiece in the style that you always loved.</p><ul><li>#1 Gift of the year for pet lovers</li><li>Approve your artwork before it’s printed</li><li>Free unlimited revisions</li><li>Hand-drawn by real artists</li></ul><p>Want more than 4 people/pets? <a href="custom-cartoon-art-wrapped-pet-canvas-7-or-more-characters.html" title="https://abc.com/products/custom-cartoon-art-wrapped-pet-canvas-7-or-more-characters"><strong>Click here</strong> to shop our 5+ character options!</a></p>
+                    
+                
+            </div>
+        
+            <div class="productTabsContentItem rte " data-name="shipping">
+                
+                    <p><strong>Shipping Times</strong></p><p>USA: 3-5 working days</p><p>CA, AUS, UK: 5-7 working days</p><p>Europe: 5-10 working days</p><p>Rest of world: 10-15 working days</p><p>All orders are shipped fully tracked.</p><p><strong>Artwork Creation Time</strong></p><p>Artwork previews will be sent to you via email within 1-2 days. We'll start printing within 48 hours of receiving approval of your artwork!</p><p><strong>Returns</strong></p><p>As all orders are personalized and one of a kind, we do not accept returns. We do offer a <strong>100% satisfaction guarantee</strong>. If you are unhappy with your item once received, we will redo and replace the item free of charge.</p>
+                
+            </div>
+        
+            <div class="productTabsContentItem rte " data-name="guarantee">
+                
+                    <p>At Pet Creations Art, your satisfaction is our top priority. We proudly offer a <strong>100% Customer Satisfaction Guarantee.</strong></p><p>This means we will work closely with you until you are completely thrilled with your artwork.</p><p>We understand that perfection takes time, so we are committed to making as many changes as needed to ensure your preview meets your expectations.</p><p>What sets us apart is our dedication to quality. We believe in the value of personalized, hand-drawn art, so we never use apps or shortcuts that compromise the final product.</p><p>Trust us to create a masterpiece that you’ll treasure for years to come.</p>
+                
+            </div>
+        
+    </div>
+</div>
+
+        <div id="productOwners">
+            <img id="productOwnersImage" src="static/picture/Sallie-Sophia_2_1.png" alt="" loading="lazy">
+            <div id="productOwnersText"><p>Hi! We're Sallie and Sophia, pet portrait artists driven by our deep passion for art & animals. We love turning this passion into our daily work.</p><p><br><strong>Sallie & Sophia xox</strong></p></div>
+        </div>
+
+    </div>
+</section>
+
+<dialog id="productNoPhotoDialog" class="mainDialog">
+    <div class="mainDialogInner">
+        <div class="mainDialogExit closeDialog">
+            <svg width="40" height="41" viewbox="0 0 40 41" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect y="0.5" width="40" height="40" rx="20" fill="white"></rect>
+                <path d="M27.6653 14.451C28.1116 14.0047 28.1116 13.281 27.6653 12.8347C27.219 12.3884 26.4953 12.3884 26.049 12.8347L20 18.8838L13.951 12.8347C13.5047 12.3884 12.781 12.3884 12.3347 12.8347C11.8884 13.281 11.8884 14.0047 12.3347 14.451L18.3838 20.5L12.3347 26.549C11.8884 26.9953 11.8884 27.719 12.3347 28.1653C12.781 28.6116 13.5047 28.6116 13.951 28.1653L20 22.1162L26.049 28.1653C26.4953 28.6116 27.219 28.6116 27.6653 28.1653C28.1116 27.719 28.1116 26.9953 27.6653 26.549L21.6162 20.5L27.6653 14.451Z" fill="#859CA2"></path>
+            </svg>
+        </div>
+        <div class="mainDialogImageContainer">
+            <img class="mainDialogImage" src="static/picture/Image_3c640bf8-a726-4439-9901-7e19e2d9a207.png" alt="" loading="lazy">
+        </div>
+        <div class="mainDialogText"><p><strong>No photos ready?<br>It's all good!</strong><br><br>We'll send you a secure link to upload your photo(s) whenever you're ready. Or feel free to add them here before continuing.</p></div>
+
+        <div id="productNoPhotoFormInput">
+            <div id="productNoPhotoDialogInputDisplay"></div>
+            <div id="productNoPhotoDialogInputText">
+                <svg xmlns="http://www.w3.org/2000/svg" width="21" height="20" viewbox="0 0 21 20" fill="none">
+                    <path d="M10.5 14.6677C11.2367 14.6677 11.8333 14.0712 11.8333 13.3347V3.55999L13.8667 5.58958C14.3133 6.04949 15.0167 6.1328 15.56 5.79287C16.1767 5.39295 16.3533 4.56645 15.9533 3.94991C15.9033 3.86993 15.8433 3.79661 15.7767 3.72995L13.2 1.15381C12.8133 0.760554 12.3467 0.450617 11.8333 0.250657C10.45 -0.282568 8.88 0.0506976 7.83333 1.10049L5.2 3.72995C4.68 4.24985 4.67667 5.09301 5.2 5.61624C5.25667 5.67289 5.32 5.72622 5.38333 5.76954C5.94667 6.14613 6.70333 6.05948 7.16667 5.56292L9.16667 3.56332V13.3347C9.16667 14.0712 9.76333 14.6677 10.5 14.6677ZM19.1667 11.3351C18.43 11.3351 17.8333 11.9316 17.8333 12.6681V16.6673C17.8333 17.0339 17.5333 17.3339 17.1667 17.3339H3.83333C3.46667 17.3339 3.16667 17.0339 3.16667 16.6673V12.6681C3.16667 11.9316 2.57 11.3351 1.83333 11.3351C1.09667 11.3351 0.5 11.9316 0.5 12.6681V16.6673C0.5 18.507 1.99333 20 3.83333 20H17.1667C19.0067 20 20.5 18.507 20.5 16.6673V12.6681C20.5 11.9316 19.9033 11.3351 19.1667 11.3351Z" fill="#868684"></path>
+                </svg>
+                <span>Upload Photo Now</span>
+            </div>
+        </div>
+
+        <button id="productNoPhotoDialogReturn">Send photo later</button>
+
+    </div>
+</dialog>
+
+
+</div> 
+   
+
+ 
+<div id="shopify-section-template--18265728680154__section_how_it_works_7RDrHL" class="shopify-section">
+    <style>
+
+    [id="template--18265728680154__section_how_it_works_7RDrHL"] {
+        padding: 80px 30px 80px;
+        border-bottom: 2px solid #F1F6FB;
+        background-color: #fff;
+    }
+
+    [id="template--18265728680154__section_how_it_works_7RDrHL"].noBackground {
+        background-color: transparent;
+    }
+
+    [id="template--18265728680154__section_how_it_works_7RDrHL"].noBorder {
+        border-bottom: none;
+    }
+
+    .worksTitle {
+        text-align: center;
+        font-family: Faktum;
+        font-size: 48px;
+        font-weight: 600;
+        line-height: 100%;
+        margin-bottom: 44px;
+    }
+
+    .worksBlock {
+        display: flex;
+        justify-content: center;
+        flex-wrap: wrap;
+        gap: 32px;
+        align-items: flex-start;
+    }
+
+    .worksItem {
+        flex: 1;
+        min-width: 330px;
+        max-width: 500px;
+        display: block;
+        padding: 20px 24px 36px;
+        border: 2px solid;
+        border-radius: 24px;
+        box-shadow: 0 -2px 0 0 rgba(0, 0, 0, 0.10) inset;
+        text-align: center;
+    }
+
+    .worksItem:nth-child(1) {
+        border-color: #E6B4FE;
+    }
+
+    .worksItem:nth-child(2) {
+        border-color: #aebbee;
+    }
+
+    .worksItem:nth-child(3) {
+        border-color: #77E3FF;
+    }
+
+    .worksItemImage {
+        border-radius: 50%;
+        margin: 0 auto 20px;
+        overflow: hidden;
+        width: 124px;
+        height: 124px;
+    }
+
+    .worksItem:nth-child(1) .worksItemImage {
+        background-color: #F1EDFB;
+    }
+
+    .worksItem:nth-child(2) .worksItemImage {
+        background-color: #E9F1FA;
+    }
+
+    .worksItem:nth-child(3) .worksItemImage {
+        background-color: #E4F9FF;
+    }
+
+    .worksItemImage img {
+        object-fit: contain;
+    }
+
+    .worksItemTitle {
+        font-family: Faktum;
+        font-size: 24px;
+        font-weight: 700;
+        line-height: 100%;
+        margin-bottom: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+    }
+
+    .worksItemTitle span {
+        display: flex;
+        width: 32px;
+        height: 32px;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        border-radius: 50%;
+        color: #FFF;
+        font-size: 18px;
+    }
+
+    .worksItem:nth-child(1) .worksItemTitle span {
+        background-color: #BEA9EC;
+    }
+
+    .worksItem:nth-child(2) .worksItemTitle span {
+        background-color: #97BEE6;
+    }
+
+    .worksItem:nth-child(3) .worksItemTitle span {
+        background-color: #77E3FF;
+    }
+
+    .worksItemDescription {
+        color: var(--secondary);
+        font-weight: 500;
+    }
+
+    @media (max-width: 800px) {
+
+        [id="template--18265728680154__section_how_it_works_7RDrHL"] {
+            padding: 48px 20px 48px;
+        }
+
+        .worksTitle {
+            font-size: 36px;
+            margin-bottom: 32px;
+        }
+
+        .worksBlock {
+            grid-template-columns: 1fr;
+            gap: 16px;
+            align-items: center;
+        }
+
+        .worksItem {
+            position: relative;
+            padding: 36px 24px;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            text-align: start;
+        }
+
+        .worksItemImage {
+            margin: 0;
+            width: 100%;
+            max-width: 84px;
+            height: 84px;
+        }
+
+        .worksItemTitle {
+            max-width: 70%;
+        }
+
+        .worksItemTitle span {
+            position: absolute;
+            top: 12px;
+            right: 12px;
+        }
+
+    }
+
+</style>
+
+<section id="template--18265728680154__section_how_it_works_7RDrHL" class="works container ">
+
+    <div class="worksTitle">How it Works</div>
+
+    <div class="worksBlock">
+        
+
+            <a href="contact-us-how-it-works.html" class="worksItem">
+
+                <div class="worksItemImage">
+                    <img src="static/picture/img-howitworks-02b_1-1720189109_150.png" alt="">
+                </div>
+
+                <div>
+                    <div class="worksItemTitle"><span>1</span>Upload your pet photo</div>
+
+                    <div class="worksItemDescription">Choose and upload your favorite pet photo(s).</div>
+                </div>
+
+            </a>
+
+        
+
+            <a href="contact-us-how-it-works.html" class="worksItem">
+
+                <div class="worksItemImage">
+                    <img src="static/picture/img-howitworks-02b_1_2.png" alt="">
+                </div>
+
+                <div>
+                    <div class="worksItemTitle"><span>2</span>Approve your art</div>
+
+                    <div class="worksItemDescription">Approve your art or request any changes, free of charge!</div>
+                </div>
+
+            </a>
+
+        
+
+            <a href="contact-us-how-it-works.html" class="worksItem">
+
+                <div class="worksItemImage">
+                    <img src="static/picture/img-howitworks-02b_1_1-1720189283_150.png" alt="">
+                </div>
+
+                <div>
+                    <div class="worksItemTitle"><span>3</span>Show off your art</div>
+
+                    <div class="worksItemDescription">We’ll print and ship it to your door! (in 5-7 days)</div>
+                </div>
+
+            </a>
+
+        
+    </div>
+
+</section>
+
+</div><div id="shopify-section-template--18265728680154__section_body_background_AiQ3jj" class="shopify-section"><style>
+
+    [id="template--18265728680154__section_body_background_AiQ3jj"] {
+        height: 0;
+        width: 100%;
+        position: relative;
+    }
+
+    #headerBackground {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        z-index: -1;
+    }
+
+
+</style>
+
+<section id="template--18265728680154__section_body_background_AiQ3jj">
+    <picture id="headerBackground">
+        <source media="(max-width: 550px)" srcset="//petcreationsart.com/cdn/shop/files/Group_1000006874_1.png?v=1720540698&width=600">
+        <source media="(max-width: 800px)" srcset="//petcreationsart.com/cdn/shop/files/Group_1000006874_1.png?v=1720540698&width=900">
+        <source media="(max-width: 1400px)" srcset="//petcreationsart.com/cdn/shop/files/Group_1000006873_4.png?v=1720540553&width=1500">
+        <source srcset="//petcreationsart.com/cdn/shop/files/Group_1000006873_4.png?v=1720540553&width=2016">
+        <img src="static/picture/Group_1000006873_4.png" alt="" loading="lazy">
+    </picture>
+</section>
+
+</div><div id="shopify-section-template--18265728680154__section_custom_reviews_KUa7X7" class="shopify-section"><style>
+
+    [id="template--18265728680154__section_custom_reviews_KUa7X7"] {
+        padding: 136px 0 80px;
+        border-bottom: 2px solid #F1F6FB;
+        background-color: #fff;
+    }
+
+    [id="template--18265728680154__section_custom_reviews_KUa7X7"].noBackground {
+        background-color: transparent;
+    }
+
+    [id="template--18265728680154__section_custom_reviews_KUa7X7"].noBorder {
+        border-bottom: none;
+    }
+
+    .customRevTitle {
+        text-align: center;
+        font-family: Faktum;
+        font-size: 48px;
+        font-weight: 600;
+        line-height: 100%;
+    }
+
+    .customRevTitle + .customRevRating {
+        margin-top: 24px;
+    }
+
+    .customRevRating {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        font-family: Roboto;
+        font-size: 12px;
+        line-height: 216.667%;
+    }
+
+    .customRevRatingImage {
+        width: 106px;
+    }
+
+    .customRevRating svg {
+        width: 14px;
+        height: auto;
+    }
+
+    .customRevBlock {
+        padding: 44px 30px 50px;
+        position: relative;
+        max-width: 1276px;
+        margin: 0 auto;
+    }
+
+    .customRevBlock .swiper-slide {
+        height: auto;
+    }
+
+    .customRevBlockMedia {
+        height: 100%;
+    }
+
+    .customRevBlockNavigation {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 70px;
+    }
+
+    .customRevBlockNavigation .nextEl,
+    .customRevBlockNavigation .prevEl {
+        cursor: pointer;
+    }
+
+    .customRevBlockNavigation .swiper-pagination {
+        position: static;
+        max-width: fit-content;
+        --swiper-pagination-bullet-horizontal-gap: 8px;
+    }
+
+    .customRevBlockNavigation .swiper-pagination-bullet:not(.swiper-pagination-bullet-active) {
+        background-color: #fff;
+        opacity: .8;
+    }
+
+    @media (max-width: 800px) {
+
+        [id="template--18265728680154__section_custom_reviews_KUa7X7"] {
+            padding: 80px 0 48px;
+        }
+
+        .customRevTitle {
+            font-size: 36px;
+        }
+
+        .customRevTitle + .customRevRating {
+            margin-top: 16px;
+        }
+
+        .customRevBlock {
+            padding: 36px 20px 50px;
+        }
+
+        .customRevBlockNavigation {
+            padding: 0 20px;
+            gap: 20px;
+        }
+
+    }
+
+</style>
+
+<section id="template--18265728680154__section_custom_reviews_KUa7X7" class="noBackground noBorder">
+
+    
+        <div class="customRevTitle"><p>Join 50,000+</p><p>Happy Customers</p></div>
+    
+
+    
+
+    
+
+    <div class="customRevBlock swiper">
+        <div class="swiper-wrapper">
+            
+                <div class="swiper-slide">
+                    
+                        <video playsinline="true" class="customRevBlockMedia" loop="loop" autoplay="autoplay" muted="muted" preload="metadata" poster="//petcreationsart.com/cdn/shop/files/preview_images/971ce05de178413fbe4516f1d66ee1dc.thumbnail.0000000000_300x.jpg?v=1721743573"><source src="//petcreationsart.com/cdn/shop/videos/c/vp/971ce05de178413fbe4516f1d66ee1dc/971ce05de178413fbe4516f1d66ee1dc.HD-1080p-7.2Mbps-32203941.mp4?v=0" type="video/mp4"><img src="static/picture/971ce05de178413fbe4516f1d66ee1dc.thumbnail.0000000000_300x.jpg"></video>
+                    
+                </div>
+            
+                <div class="swiper-slide">
+                    
+                        <video playsinline="true" class="customRevBlockMedia" loop="loop" autoplay="autoplay" muted="muted" preload="metadata" poster="//petcreationsart.com/cdn/shop/files/preview_images/f59290a59ad04709b576af64dea025af.thumbnail.0000000000_300x.jpg?v=1721768923"><source src="//petcreationsart.com/cdn/shop/videos/c/vp/f59290a59ad04709b576af64dea025af/f59290a59ad04709b576af64dea025af.HD-1080p-3.3Mbps-32222833.mp4?v=0" type="video/mp4"><img src="static/picture/f59290a59ad04709b576af64dea025af.thumbnail.0000000000_300x.jpg"></video>
+                    
+                </div>
+            
+                <div class="swiper-slide">
+                    
+                        <video playsinline="true" class="customRevBlockMedia" loop="loop" autoplay="autoplay" muted="muted" preload="metadata" poster="//petcreationsart.com/cdn/shop/files/preview_images/2233535af0054ed5b0b8f3100da1046f.thumbnail.0000000000_300x.jpg?v=1721768935"><source src="//petcreationsart.com/cdn/shop/videos/c/vp/2233535af0054ed5b0b8f3100da1046f/2233535af0054ed5b0b8f3100da1046f.HD-1080p-3.3Mbps-32222836.mp4?v=0" type="video/mp4"><img src="static/picture/2233535af0054ed5b0b8f3100da1046f.thumbnail.0000000000_300x.jpg"></video>
+                    
+                </div>
+            
+                <div class="swiper-slide">
+                    
+                        <video playsinline="true" class="customRevBlockMedia" loop="loop" autoplay="autoplay" muted="muted" preload="metadata" poster="//petcreationsart.com/cdn/shop/files/preview_images/e5c841547f7d4495b37aad4b230c5115.thumbnail.0000000000_300x.jpg?v=1721768945"><source src="//petcreationsart.com/cdn/shop/videos/c/vp/e5c841547f7d4495b37aad4b230c5115/e5c841547f7d4495b37aad4b230c5115.HD-1080p-3.3Mbps-32222846.mp4?v=0" type="video/mp4"><img src="static/picture/e5c841547f7d4495b37aad4b230c5115.thumbnail.0000000000_300x.jpg"></video>
+                    
+                </div>
+            
+                <div class="swiper-slide">
+                    
+                        <video playsinline="true" class="customRevBlockMedia" loop="loop" autoplay="autoplay" muted="muted" preload="metadata" poster="//petcreationsart.com/cdn/shop/files/preview_images/d2999d08420a4fabad54e17345f35aa7.thumbnail.0000000000_300x.jpg?v=1721768939"><source src="//petcreationsart.com/cdn/shop/videos/c/vp/d2999d08420a4fabad54e17345f35aa7/d2999d08420a4fabad54e17345f35aa7.HD-1080p-3.3Mbps-32222841.mp4?v=0" type="video/mp4"><img src="static/picture/d2999d08420a4fabad54e17345f35aa7.thumbnail.0000000000_300x.jpg"></video>
+                    
+                </div>
+            
+                <div class="swiper-slide">
+                    
+                        <video playsinline="true" class="customRevBlockMedia" loop="loop" autoplay="autoplay" muted="muted" preload="metadata" poster="//petcreationsart.com/cdn/shop/files/preview_images/8ff96246c35a481e88f947f66b6fad0b.thumbnail.0000000000_300x.jpg?v=1721768941"><source src="//petcreationsart.com/cdn/shop/videos/c/vp/8ff96246c35a481e88f947f66b6fad0b/8ff96246c35a481e88f947f66b6fad0b.HD-1080p-3.3Mbps-32222843.mp4?v=0" type="video/mp4"><img src="static/picture/8ff96246c35a481e88f947f66b6fad0b.thumbnail.0000000000_300x.jpg"></video>
+                    
+                </div>
+            
+                <div class="swiper-slide">
+                    
+                        <video playsinline="true" class="customRevBlockMedia" loop="loop" autoplay="autoplay" muted="muted" preload="metadata" poster="//petcreationsart.com/cdn/shop/files/preview_images/fadde56038714e01805d58563eb7890f.thumbnail.0000000000_300x.jpg?v=1721768945"><source src="//petcreationsart.com/cdn/shop/videos/c/vp/fadde56038714e01805d58563eb7890f/fadde56038714e01805d58563eb7890f.HD-1080p-3.3Mbps-32222853.mp4?v=0" type="video/mp4"><img src="static/picture/fadde56038714e01805d58563eb7890f.thumbnail.0000000000_300x.jpg"></video>
+                    
+                </div>
+            
+                <div class="swiper-slide">
+                    
+                        <video playsinline="true" class="customRevBlockMedia" loop="loop" autoplay="autoplay" muted="muted" preload="metadata" poster="//petcreationsart.com/cdn/shop/files/preview_images/e622f317f9d44d70929780d9f48e97df.thumbnail.0000000000_300x.jpg?v=1721831053"><source src="//petcreationsart.com/cdn/shop/videos/c/vp/e622f317f9d44d70929780d9f48e97df/e622f317f9d44d70929780d9f48e97df.HD-1080p-3.3Mbps-32257555.mp4?v=0" type="video/mp4"><img src="static/picture/e622f317f9d44d70929780d9f48e97df.thumbnail.0000000000_300x.jpg"></video>
+                    
+                </div>
+            
+        </div>
+    </div>
+
+    <div class="customRevBlockNavigation">
+        <div class="prevEl">
+            <svg width="49" height="48" viewbox="0 0 49 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M0.5 24.0022C0.5 10.7474 11.2452 0 24.5 0C37.7548 0 48.5 10.7474 48.5 24.0022C48.5 37.257 37.7548 48.0044 24.5 48.0044C11.2452 48.0044 0.5 37.257 0.5 24.0022Z" fill="#859CA2"></path>
+                <path d="M0.5 24.0022C0.5 10.7474 11.2452 0 24.5 0C37.7548 0 48.5 10.7474 48.5 24.0022C48.5 37.257 37.7548 48.0044 24.5 48.0044C11.2452 48.0044 0.5 37.257 0.5 24.0022Z" fill="white"></path>
+                <path d="M26.8408 32.0043C26.6273 32.0049 26.4164 31.9672 26.2235 31.894C26.0307 31.8208 25.8608 31.714 25.7263 31.5814L18.825 24.723C18.6149 24.5185 18.5 24.2619 18.5 23.9972C18.5 23.7324 18.6149 23.4758 18.825 23.2713L25.9692 16.4129C26.2117 16.1795 26.5602 16.0327 26.938 16.0048C27.3159 15.977 27.692 16.0703 27.9838 16.2643C28.2756 16.4584 28.4591 16.7372 28.494 17.0394C28.5288 17.3417 28.4121 17.6426 28.1696 17.8761L21.7827 24.0029L27.9553 30.1297C28.13 30.2975 28.241 30.5018 28.2751 30.7185C28.3092 30.9351 28.265 31.1551 28.1478 31.3523C28.0305 31.5495 27.8451 31.7157 27.6135 31.8313C27.3819 31.9468 27.1137 32.0069 26.8408 32.0043Z" fill="#2677CB"></path>
+            </svg>
+        </div>
+        <div class="swiper-pagination"></div>
+        <div class="nextEl">
+            <svg width="49" height="48" viewbox="0 0 49 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M0.5 24.0022C0.5 10.7474 11.2452 0 24.5 0C37.7548 0 48.5 10.7474 48.5 24.0022C48.5 37.257 37.7548 48.0044 24.5 48.0044C11.2452 48.0044 0.5 37.257 0.5 24.0022Z" fill="white"></path>
+                <path d="M22.1592 16.0001C22.3727 15.9995 22.5836 16.0372 22.7765 16.1104C22.9693 16.1836 23.1392 16.2904 23.2737 16.423L30.175 23.2814C30.3851 23.4859 30.5 23.7425 30.5 24.0072C30.5 24.272 30.3851 24.5286 30.175 24.7331L23.0308 31.5915C22.7883 31.8249 22.4398 31.9717 22.062 31.9996C21.6841 32.0274 21.308 31.9341 21.0162 31.7401C20.7244 31.546 20.5409 31.2672 20.506 30.965C20.4712 30.6627 20.5879 30.3618 20.8304 30.1283L27.2173 24.0015L21.0447 17.8747C20.87 17.7069 20.759 17.5026 20.7249 17.2859C20.6908 17.0693 20.735 16.8493 20.8522 16.6521C20.9695 16.4549 21.1549 16.2887 21.3865 16.1731C21.6181 16.0576 21.8863 15.9975 22.1592 16.0001Z" fill="#2677CB"></path>
+            </svg>
+        </div>
+    </div>
+
+</section>
+
+<script>
+    (function () {
+        const section = document.querySelector(`[id="template--18265728680154__section_custom_reviews_KUa7X7"]`);
+        new Swiper(section.querySelector(".swiper"), {
+            slidesPerView: 1.2,
+            spaceBetween: 16,
+            breakpoints: {
+                801: {
+                    slidesPerView: 4,
+                }
+            },
+            pagination: {
+                el: section.querySelector(".swiper-pagination"),
+                type: 'bullets',
+            },
+            navigation: {
+                nextEl: section.querySelector(".nextEl"),
+                prevEl: section.querySelector(".prevEl"),
+            },
+        });
+    }());
+</script>
+
+</div><div id="shopify-section-template--18265728680154__section_differences_Aq7W9g" class="shopify-section"><style>
+
+    .differences {
+        max-width: 1440px;
+        margin: 0 auto;
+        padding: 0 40px;
+    }
+
+    .differencesInner {
+        padding: 64px 72px;
+        display: grid;
+        grid-template-columns: 1fr 696px;
+        align-items: center;
+        gap: 32px;
+        border-radius: 24px;
+        box-shadow: -11px 27px 30px 0 rgba(0, 0, 0, 0.06);
+        background-color: #fff;
+    }
+
+    .differencesTitle {
+        font-family: Faktum;
+        font-size: 64px;
+        font-weight: 600;
+        line-height: 90%;
+    }
+
+    .differencesImage {
+        width: 100%;
+    }
+
+    .differencesImage * {
+        object-fit: cover;
+    }
+
+    .differencesChart {
+        border: 2px solid #E8EDF2;
+        border-radius: 16px;
+        width: 100%;
+    }
+
+    .differencesChartTop {
+        display: grid;
+        grid-template-columns: 1fr 176px 176px;
+    }
+
+    .differencesChartTopLogo {
+        padding: 22px 20px 18px;
+        display: grid;
+        place-content: center;
+        text-align: center;
+        border-left: 2px solid #E8EDF2;
+    }
+
+    .differencesChartTopLogo svg {
+        width: 136px;
+        height: 33px;
+    }
+
+    .differencesChartTopOthers {
+        color: var(--secondary);
+        font-size: 18px;
+        line-height: 1;
+        display: grid;
+        place-content: center;
+        text-align: center;
+        border-left: 2px solid #E8EDF2;
+    }
+
+    .differencesChartList {
+        width: 100%;
+    }
+
+    .differencesChartListItem {
+        display: grid;
+        grid-template-columns: 1fr 176px 176px;
+        border-top: 2px solid #E8EDF2;
+    }
+
+    .differencesChartListItemText {
+        font-size: 18px;
+        line-height: 1;
+        padding: 20px 16px;
+    }
+
+    .differencesChartListItemIcon {
+        display: grid;
+        place-content: center;
+        border-left: 2px solid #E8EDF2;
+    }
+
+    .differencesChartListItemIcon svg {
+        width: 20px;
+        height: 20px;
+    }
+
+    @media (max-width: 1200px) {
+
+        .differences {
+            padding: 0 20px;
+        }
+
+        .differencesInner {
+            padding: 32px 36px;
+            grid-template-columns: 1fr 600px;
+        }
+
+        .differencesTitle {
+            font-size: 48px;
+            line-height: 100%;
+        }
+
+        .differencesChartTop {
+            grid-template-columns: 1fr 150px 150px;
+        }
+
+        .differencesChartListItem {
+            grid-template-columns: 1fr 150px 150px;
+        }
+
+    }
+
+    @media (max-width: 800px) {
+
+        .differences {
+            padding: 0 12px;
+        }
+
+        .differencesInner {
+            padding: 48px 12px;
+            grid-template-columns: 1fr;
+            border-radius: 16px;
+            box-shadow: -10px 27px 30px 0 rgba(0, 0, 0, 0.06);
+        }
+
+        .differencesTitle {
+            font-size: 36px;
+            text-align: center;
+        }
+
+        .differencesTitle br {
+            display: none;
+        }
+
+        .differencesChartTop {
+            grid-template-columns: 1fr 99px 99px;
+        }
+
+        .differencesChartTopLogo {
+            padding: 24px 9px;
+        }
+
+        .differencesChartTopLogo svg {
+            width: 81px;
+            height: 19px;
+        }
+
+        .differencesChartTopOthers {
+            font-size: 14px;
+        }
+
+        .differencesChartListItem {
+            grid-template-columns: 1fr 99px 99px;
+        }
+
+        .differencesChartListItemText {
+            font-size: 14px;
+            padding: 16px 12px;
+        }
+
+        .differencesChartListItemIcon svg {
+            width: 24px;
+            height: 24px;
+        }
+    }
+
+</style>
+
+<section class="differences">
+    <div class="differencesInner">
+
+        <div class="differencesTitle">What <br>
+Makes Us <br>
+Different?</div>
+
+        
+            <div class="differencesChart">
+                <div class="differencesChartTop">
+                    <div></div>
+                    <div class="differencesChartTopLogo">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="159" height="38" viewbox="0 0 159 38" fill="none">
+    <path d="M8.08592 1.52607C7.22038 1.04016 6.18022 0.797203 4.96544 0.797203H0V16.7413H3.62158V11.7758H4.96544C6.18022 11.7758 7.22038 11.5253 8.08592 11.0242C8.95145 10.5231 9.61199 9.84735 10.0675 8.997C10.5383 8.14665 10.7736 7.2052 10.7736 6.17263C10.7736 5.14006 10.5383 4.26693 10.0675 3.46214C9.61199 2.64216 8.95145 1.9968 8.08592 1.52607ZM6.71928 8.06314C6.43077 8.44276 5.83856 8.63257 4.94266 8.63257H3.62158V3.91768H4.94266C5.83856 3.91768 6.43077 4.11509 6.71928 4.50989C7.00779 4.88951 7.15205 5.47413 7.15205 6.26374C7.15205 7.05335 7.00779 7.66833 6.71928 8.06314ZM19.2581 6.03596C18.5141 5.41339 17.5347 5.1021 16.3199 5.1021C15.3329 5.1021 14.4522 5.35265 13.6777 5.85375C12.9033 6.35485 12.2959 7.06094 11.8555 7.97203C11.4304 8.86793 11.2178 9.92328 11.2178 11.1381C11.2178 12.3528 11.438 13.3095 11.8783 14.1902C12.3187 15.0557 12.9261 15.7391 13.7005 16.2402C14.4901 16.7261 15.3936 16.969 16.411 16.969C17.6258 16.969 18.6204 16.6805 19.3948 16.1035C20.1692 15.5265 20.7311 14.6306 21.0803 13.4158L18.1193 12.8008C17.9826 13.393 17.7852 13.7878 17.5271 13.9852C17.2841 14.1826 16.9576 14.2813 16.5477 14.2813C15.9554 14.2813 15.5303 14.1522 15.2721 13.8941C15.014 13.636 14.847 13.0665 14.771 12.1858H21.2625C21.3233 10.8192 21.1866 9.6044 20.8526 8.54146C20.5337 7.47852 20.0022 6.64336 19.2581 6.03596ZM17.8915 9.90809H14.771C14.8318 9.14885 14.976 8.6022 15.2038 8.26813C15.4468 7.93407 15.8643 7.76703 16.4565 7.76703C16.9576 7.76703 17.3297 7.92647 17.5726 8.24535C17.8156 8.54905 17.9219 9.1033 17.8915 9.90809ZM26.8316 5.32987H28.9726V8.38202H26.8316V13.6891H28.8587V16.7413H27.0821C25.9584 16.7413 25.0474 16.392 24.3489 15.6935C23.6655 14.995 23.3239 14.0687 23.3239 12.9147V8.38202H21.8206V5.32987H23.3239V2.0044H26.8316V5.32987ZM37.6963 5.69431C37.5597 6.39281 37.4913 7.41778 37.4913 8.76923C37.4913 10.1207 37.5597 11.1305 37.6963 11.8442C37.8482 12.5427 38.1215 13.021 38.5163 13.2791C38.9263 13.5373 39.5109 13.6663 40.2701 13.6663C41.0294 13.6663 41.5684 13.56 41.9329 13.3475C42.2973 13.1197 42.5479 12.7097 42.6845 12.1175C42.8212 11.5253 42.9123 10.6673 42.9579 9.54366L46.7161 10.227C46.625 11.5784 46.2985 12.7628 45.7367 13.7802C45.1748 14.7976 44.4232 15.5872 43.4817 16.1491C42.5555 16.6957 41.5001 16.969 40.3157 16.969C38.9491 16.969 37.7646 16.635 36.7624 15.9668C35.7602 15.2835 34.9858 14.3345 34.4392 13.1197C33.9077 11.8897 33.642 10.4547 33.642 8.81479C33.642 7.17483 33.9077 5.69431 34.4392 4.46434C34.9858 3.21918 35.7602 2.26254 36.7624 1.59441C37.7646 0.911089 38.9491 0.569431 40.3157 0.569431C41.5001 0.569431 42.5555 0.85035 43.4817 1.41219C44.408 1.95884 45.1521 2.73327 45.7139 3.73546C46.2909 4.73766 46.625 5.92208 46.7161 7.28871L42.9579 7.97203C42.9123 6.84835 42.8212 5.99041 42.6845 5.3982C42.5479 4.80599 42.2973 4.4036 41.9329 4.19101C41.5684 3.97842 41.0142 3.87213 40.2701 3.87213C39.5261 3.87213 38.9263 4.0012 38.5163 4.25934C38.1215 4.51748 37.8482 4.9958 37.6963 5.69431ZM54.2592 5.14765C54.7906 5.14765 55.1551 5.23117 55.3525 5.3982V8.58701C54.9728 8.45035 54.5856 8.38202 54.1908 8.38202C53.4316 8.38202 52.8318 8.67053 52.3914 9.24755C51.9511 9.80939 51.7309 10.561 51.7309 11.5025V16.7413H48.2232V5.32987H51.7309V8.08591C51.8524 7.0989 52.0953 6.36244 52.4598 5.87652C52.8394 5.39061 53.4392 5.14765 54.2592 5.14765ZM65.7047 13.4158L62.7437 12.8008C62.607 13.393 62.4096 13.7878 62.1515 13.9852C61.9085 14.1826 61.582 14.2813 61.172 14.2813C60.5798 14.2813 60.1547 14.1522 59.8965 13.8941C59.6384 13.636 59.4713 13.0665 59.3954 12.1858H65.8869C65.9477 10.8192 65.811 9.6044 65.4769 8.54146C65.1581 7.47852 64.6266 6.64336 63.8825 6.03596C63.1385 5.41339 62.1591 5.1021 60.9443 5.1021C59.9573 5.1021 59.0765 5.35265 58.3021 5.85375C57.5277 6.35485 56.9203 7.06094 56.4799 7.97203C56.0548 8.86793 55.8422 9.92328 55.8422 11.1381C55.8422 12.3528 56.0623 13.3095 56.5027 14.1902C56.9431 15.0557 57.5505 15.7391 58.3249 16.2402C59.1145 16.7261 60.018 16.969 61.0354 16.969C62.2502 16.969 63.2448 16.6805 64.0192 16.1035C64.7936 15.5265 65.3555 14.6306 65.7047 13.4158ZM59.8282 8.26813C60.0711 7.93407 60.4887 7.76703 61.0809 7.76703C61.582 7.76703 61.9541 7.92647 62.197 8.24535C62.44 8.54905 62.5463 9.1033 62.5159 9.90809H59.3954C59.4562 9.14885 59.6004 8.6022 59.8282 8.26813ZM72.2266 10.2953C70.4955 10.2953 69.1744 10.599 68.2634 11.2064C67.3523 11.7986 66.8967 12.7021 66.8967 13.9169C66.8967 14.828 67.1852 15.5644 67.7623 16.1263C68.3545 16.6881 69.1365 16.969 70.1083 16.969C70.8524 16.969 71.4749 16.7716 71.976 16.3768C72.4771 15.982 72.8416 15.367 73.0693 14.5319V16.7413H76.5087V9.42977C76.5087 6.54466 74.975 5.1021 71.9077 5.1021C70.3589 5.1021 69.182 5.45894 68.3772 6.17263C67.5876 6.87113 67.1852 7.85055 67.17 9.11089L70.3816 9.72587C70.3816 9.04256 70.4879 8.55664 70.7005 8.26813C70.9131 7.97962 71.2775 7.83536 71.7938 7.83536C72.6442 7.83536 73.0693 8.26813 73.0693 9.13367V10.2953H72.2266ZM73.0693 12.1175C73.0693 12.9678 72.9023 13.5449 72.5683 13.8486C72.2494 14.1522 71.8925 14.3041 71.4977 14.3041C71.1485 14.3041 70.8675 14.213 70.655 14.0308C70.4576 13.8486 70.3589 13.5904 70.3589 13.2563C70.3589 12.4667 71.027 12.0719 72.3633 12.0719H73.0693V12.1175ZM79.0484 8.38202H77.5451V5.32987H79.0484V2.0044H82.5561V5.32987H84.6971V8.38202H82.5561V13.6891H84.5832V16.7413H82.8066C81.6829 16.7413 80.7718 16.392 80.0733 15.6935C79.39 14.995 79.0484 14.0687 79.0484 12.9147V8.38202ZM85.9195 1.91329C85.9195 1.29071 86.0941 0.81998 86.4434 0.501099C86.8078 0.167033 87.3165 0 87.9695 0C88.6224 0 89.1463 0.167033 89.4955 0.501099C89.86 0.81998 90.0422 1.29071 90.0422 1.91329C90.0422 2.53586 89.86 3.05974 89.4955 3.39381C89.1463 3.72787 88.6376 3.89491 87.9695 3.89491C86.6028 3.89491 85.9195 3.23437 85.9195 1.91329ZM86.2384 5.32987H89.7233V16.7413H86.2384V5.32987ZM93.7814 16.2402C94.5862 16.7261 95.5201 16.969 96.583 16.969C97.646 16.969 98.5722 16.7261 99.3619 16.2402C100.151 15.7391 100.766 15.0482 101.207 14.1674C101.647 13.2867 101.867 12.2541 101.867 11.0697C101.867 9.88531 101.647 8.80719 101.207 7.92647C100.766 7.03057 100.151 6.33966 99.3619 5.85375C98.5722 5.35265 97.646 5.1021 96.583 5.1021C95.5201 5.1021 94.5862 5.35265 93.7814 5.85375C92.9918 6.33966 92.3768 7.03057 91.9365 7.92647C91.4961 8.80719 91.2759 9.85495 91.2759 11.0697C91.2759 12.2845 91.4961 13.2867 91.9365 14.1674C92.3768 15.0482 92.9918 15.7391 93.7814 16.2402ZM95.1481 8.86034C95.4062 8.46554 95.8845 8.26813 96.583 8.26813C97.2815 8.26813 97.7371 8.46554 97.9952 8.86034C98.2534 9.25515 98.3824 9.99161 98.3824 11.0697C98.3824 12.1479 98.2534 12.8388 97.9952 13.2336C97.7371 13.6132 97.2664 13.803 96.583 13.803C95.8997 13.803 95.4062 13.6132 95.1481 13.2336C94.8899 12.8388 94.7609 12.1175 94.7609 11.0697C94.7609 10.022 94.8899 9.25515 95.1481 8.86034ZM108.511 8.26813C107.949 8.26813 107.539 8.48831 107.281 8.92867C107.023 9.36903 106.894 10.1207 106.894 11.1836V16.7413H103.409V5.32987H106.894V7.6987C107.152 6.81798 107.539 6.16504 108.055 5.73986C108.571 5.31469 109.247 5.1021 110.082 5.1021C111.282 5.1021 112.117 5.4969 112.588 6.28651C113.074 7.06094 113.317 8.26813 113.317 9.90809V16.7413H109.832V10.0903C109.832 9.48292 109.726 9.02737 109.513 8.72368C109.316 8.41998 108.981 8.26813 108.511 8.26813ZM122.963 15.9213C122.188 16.6198 121.019 16.969 119.455 16.969C117.891 16.969 116.813 16.6577 115.993 16.0352C115.188 15.4126 114.733 14.5243 114.626 13.3702L117.975 12.8919C118.066 13.9852 118.605 14.5319 119.592 14.5319C120.427 14.5319 120.845 14.2054 120.845 13.5524C120.845 13.2488 120.738 13.0134 120.526 12.8464C120.313 12.6793 119.941 12.5578 119.41 12.4819L118.18 12.2769C117.041 12.1099 116.213 11.7379 115.697 11.1608C115.196 10.5686 114.945 9.78661 114.945 8.81479C114.945 7.55445 115.355 6.62058 116.175 6.01319C117.01 5.40579 118.119 5.1021 119.501 5.1021C120.883 5.1021 121.961 5.3982 122.781 5.99041C123.601 6.56743 124.018 7.39501 124.033 8.47313L120.731 8.86034C120.7 8.32887 120.571 7.96444 120.343 7.76703C120.131 7.55445 119.804 7.44815 119.364 7.44815C118.59 7.44815 118.202 7.75185 118.202 8.35924C118.202 8.70849 118.316 8.95904 118.544 9.11089C118.772 9.24755 119.129 9.36144 119.615 9.45255L120.867 9.65754C121.991 9.83976 122.811 10.2118 123.327 10.7736C123.859 11.3355 124.125 12.0947 124.125 13.0513C124.125 14.251 123.737 15.2076 122.963 15.9213ZM132.252 13.3019H136.466L137.195 16.7413H140.976L137.127 0.797203H131.637L127.742 16.7413H131.523L132.252 13.3019ZM133.596 7.10649L134.348 3.34825H134.37L135.145 7.10649L135.783 10.1131H132.958L133.596 7.10649ZM145.596 16.7413H142.088V5.32987H145.596V8.08591C145.717 7.0989 145.96 6.36244 146.325 5.87652C146.704 5.39061 147.304 5.14765 148.124 5.14765C148.656 5.14765 149.02 5.23117 149.217 5.3982V8.58701C148.838 8.45035 148.451 8.38202 148.056 8.38202C147.297 8.38202 146.697 8.67053 146.256 9.24755C145.816 9.80939 145.596 10.561 145.596 11.5025V16.7413ZM151.203 8.38202H149.7V5.32987H151.203V2.0044H154.711V5.32987H156.852V8.38202H154.711V13.6891H156.738V16.7413H154.961C153.837 16.7413 152.926 16.392 152.228 15.6935C151.544 14.995 151.203 14.0687 151.203 12.9147V8.38202Z" fill="#00313C"></path>
+    <path d="M34.7929 32.6473C35.2295 32.4044 35.6471 32.0969 36.0381 31.7287C36.4367 31.3604 36.8011 30.9542 37.1352 30.5025C37.473 30.0432 37.7502 29.5762 37.9666 29.1055C38.1146 28.7752 38.2171 28.4336 38.2778 28.0729C38.3158 27.8603 38.331 27.6553 38.3234 27.4655C38.3158 27.2681 38.274 27.0859 38.1981 26.9265C38.1222 26.767 38.0045 26.6342 37.8527 26.5241C37.7046 26.4178 37.5148 26.3457 37.2756 26.3077C37.0061 26.2697 36.71 26.3077 36.3873 26.4216C36.0647 26.5279 35.742 26.6797 35.4193 26.8809L35.5674 26.6531C35.7382 26.395 35.909 26.1217 36.0874 25.8408C36.2734 25.5522 36.4443 25.2751 36.6075 25.017C36.7707 24.7512 36.9112 24.5083 37.0327 24.2957C37.1656 24.0831 37.2567 23.9161 37.3098 23.8022C37.3781 23.6352 37.3781 23.4605 37.3098 23.2859C37.2415 23.1037 37.1352 22.9405 36.9985 22.8038C36.8695 22.6671 36.7176 22.5684 36.5506 22.5077C36.3873 22.4394 36.2469 22.4356 36.1254 22.4963C36.0343 22.7241 35.9166 22.9784 35.7799 23.2517C35.6509 23.5175 35.5028 23.7984 35.3434 24.0869C35.1877 24.3754 35.0245 24.6753 34.8461 24.979C34.6752 25.2789 34.5044 25.5712 34.326 25.8597L33.8629 26.5924C33.5781 27.0593 33.2934 27.5301 33.0087 28.0008C32.724 28.4753 32.4583 28.9498 32.2115 29.4206C31.9648 29.8951 31.7446 30.3696 31.5548 30.8404C31.3687 31.3149 31.2283 31.7856 31.1296 32.2487C31.122 32.3474 31.1751 32.4462 31.2928 32.5449C31.3991 32.6436 31.5244 32.7271 31.6611 32.7954C31.8091 32.8561 31.9458 32.8903 32.0748 32.8979C32.2039 32.9055 32.2874 32.8675 32.3178 32.784L32.3747 32.5562C32.481 32.7005 32.6291 32.8182 32.8113 32.9131C33.0049 33.0042 33.2327 33.0535 33.5022 33.0611C33.9236 33.0156 34.3564 32.8751 34.7929 32.636V32.6473ZM33.096 31.3756C33.0581 31.2162 33.0543 31.0416 33.0846 30.8593C33.0846 30.829 33.0922 30.7834 33.1074 30.7227C33.2517 30.4228 33.4073 30.1305 33.5667 29.842C33.73 29.5458 33.897 29.2535 34.0754 28.9726C34.2615 28.7676 34.4627 28.5702 34.6866 28.388C34.9106 28.2058 35.1308 28.0463 35.3548 27.9173C35.5863 27.7882 35.8103 27.6895 36.0229 27.6212C36.2469 27.5528 36.4443 27.5225 36.6227 27.5301C36.8087 27.5377 36.8808 27.6591 36.8429 27.8983C36.8049 28.0957 36.7214 28.3311 36.5885 28.5968C36.4595 28.8625 36.2924 29.1397 36.0912 29.4206C35.8976 29.6939 35.685 29.971 35.4459 30.2444C35.2067 30.5177 34.9676 30.7644 34.7322 30.977C34.493 31.182 34.2615 31.349 34.0413 31.4705C33.8173 31.592 33.6237 31.6452 33.4529 31.63C33.2593 31.6148 33.1416 31.5313 33.096 31.3794V31.3756ZM43.5204 26.6645C43.3837 26.5279 43.2281 26.4292 43.0573 26.3684C42.894 26.3001 42.7574 26.2925 42.6435 26.3457C42.4195 26.8581 42.1955 27.3554 41.964 27.8338C41.74 28.3083 41.5198 28.7562 41.3072 29.1738L41.1098 29.4244H41.1212C40.9504 29.6597 40.7757 29.9065 40.5897 30.157C40.4037 30.4 40.2139 30.6354 40.0127 30.8555C39.8115 31.0681 39.6065 31.2655 39.3901 31.4402C39.1737 31.6072 38.9574 31.7287 38.7334 31.8084H38.6309C38.6309 31.8084 38.6461 31.778 38.6764 31.7173C38.6992 31.5578 38.7676 31.3415 38.8852 31.0757C39.0067 30.8024 39.151 30.5101 39.3104 30.2064C39.4736 29.9027 39.6407 29.5952 39.8191 29.2877C40.0051 28.9726 40.1721 28.6917 40.3278 28.4412L40.3164 28.4525C40.4227 28.2779 40.5176 28.1185 40.5935 27.9818C40.6695 27.8452 40.7264 27.7427 40.7681 27.6705C40.8441 27.4959 40.8517 27.3137 40.7909 27.1315C40.7378 26.9492 40.6429 26.7822 40.5138 26.638C40.3923 26.4937 40.2481 26.3874 40.0886 26.3153C39.9368 26.2469 39.8001 26.2394 39.6862 26.2925L39.5496 26.4519C39.4509 26.6873 39.3142 26.9872 39.1472 27.3441C38.9801 27.6971 38.7979 28.0653 38.6043 28.4563C38.4904 28.6993 38.3689 28.9498 38.2475 29.2004C38.126 29.4434 38.0045 29.6863 37.8906 29.9217C37.7767 30.1494 37.6704 30.3772 37.5793 30.5974C37.4882 30.81 37.4085 31.0036 37.3478 31.1706C37.3174 31.2541 37.2908 31.3453 37.268 31.444C37.2529 31.5427 37.2377 31.6338 37.2225 31.7173C37.1618 32.1007 37.1845 32.4234 37.2908 32.6929C37.4047 32.9586 37.6287 33.1029 37.959 33.1181C38.107 33.1181 38.2513 33.0953 38.3993 33.0497C38.5474 33.0118 38.684 32.9624 38.8131 32.9017C38.946 32.841 39.0637 32.7764 39.17 32.7081C39.2762 32.6322 39.3674 32.5638 39.4357 32.5031L39.6445 32.3323C39.4964 32.5828 39.3522 32.8296 39.2079 33.0649C39.0712 33.3079 38.927 33.5546 38.7827 33.7976C38.6347 33.7369 38.4904 33.6799 38.3462 33.6268C38.2095 33.5812 38.0615 33.5395 37.9058 33.5015C37.754 33.4711 37.5793 33.4446 37.3857 33.4218C37.1997 33.4066 36.9909 33.399 36.7518 33.399C36.319 33.399 35.8976 33.4673 35.4838 33.604C35.07 33.7482 34.6904 33.9494 34.3526 34.2C34.0071 34.4581 33.7186 34.7618 33.487 35.1073C33.2479 35.4603 33.096 35.8362 33.0239 36.2424C32.9707 36.565 32.9935 36.8346 33.0922 37.0547C33.1833 37.2749 33.3276 37.4571 33.5174 37.5938C33.7034 37.7305 33.9236 37.8292 34.1855 37.8899C34.4399 37.9582 34.7056 37.9924 34.9827 37.9924C35.8521 37.9924 36.6113 37.7988 37.268 37.4078C37.921 37.0168 38.5322 36.4701 39.1016 35.7678L39.69 36.2841L40.1152 36.6751C40.1608 36.7055 40.2329 36.7131 40.3354 36.6979C40.4417 36.6827 40.5594 36.6485 40.6808 36.5954C40.8099 36.5423 40.939 36.4777 41.0605 36.4018C41.1895 36.3335 41.2996 36.2575 41.3831 36.174C41.4667 36.0905 41.5236 36.007 41.5464 35.9235C41.5767 35.84 41.554 35.7678 41.478 35.7071C41.4477 35.6843 41.4211 35.6577 41.3983 35.6274C41.3755 35.597 41.3528 35.5704 41.33 35.5476V35.5704C41.1136 35.3806 40.8972 35.1908 40.6846 35.0086C40.4682 34.834 40.2443 34.6631 40.0165 34.5037C40.2405 34.1582 40.4569 33.7976 40.6732 33.4142C40.8972 33.0308 41.1212 32.6284 41.3528 32.1994L43.8203 27.6743C43.8962 27.4997 43.9 27.3213 43.8317 27.1466C43.7709 26.9644 43.6722 26.8012 43.5318 26.6645H43.5204ZM37.1997 35.8551C36.953 36.1057 36.7062 36.3259 36.4595 36.5081C36.2127 36.6903 35.9622 36.8346 35.7116 36.9333C35.4573 37.032 35.1991 37.0813 34.9372 37.0813C34.8081 37.0813 34.6714 37.0661 34.5348 37.0358C34.3981 37.013 34.2728 36.9674 34.1665 36.8991C34.0603 36.8384 33.9729 36.751 33.9122 36.6372C33.8515 36.5309 33.8363 36.3904 33.8667 36.212C33.897 35.9614 34.0109 35.7413 34.2007 35.559C34.3867 35.3768 34.6069 35.2212 34.8688 35.0997C35.1232 34.9782 35.4003 34.8871 35.7002 34.8264C36.0001 34.7732 36.2772 34.7466 36.5316 34.7466C37.0555 34.7542 37.511 34.8454 37.9058 35.02C37.6742 35.3275 37.4389 35.6046 37.2035 35.8551H37.1997ZM53.7436 29.6332C53.7815 29.9141 53.7626 30.2178 53.6866 30.5405C53.5576 30.9998 53.3032 31.4705 52.9236 31.9488C52.5554 32.431 52.1036 32.8675 51.5721 33.2547C51.0483 33.6458 50.475 33.957 49.8525 34.1962C49.2299 34.4316 48.6073 34.5417 47.9847 34.5189C47.6469 34.4885 47.29 34.405 46.9104 34.2683C46.5422 34.1393 46.2043 33.9532 45.8968 33.7179C45.5969 33.4901 45.354 33.2016 45.1717 32.8599C44.9933 32.5221 44.9364 32.1311 44.9971 31.6793C45.0655 31.1896 45.2477 30.7189 45.54 30.2709C45.8323 29.8116 46.2954 29.3674 46.937 28.9423L46.8914 28.9536C46.9522 28.9005 47.0699 28.9119 47.2369 28.9878C47.4153 29.0637 47.5899 29.1662 47.7684 29.2991C47.9468 29.4206 48.0948 29.5496 48.2163 29.6901C48.3454 29.8192 48.3985 29.9179 48.3644 29.9862L48.0417 30.1684C47.8633 30.2595 47.6886 30.3544 47.5102 30.4531C47.3394 30.5518 47.1799 30.6657 47.0243 30.7986C46.8762 30.9201 46.751 31.0605 46.6447 31.2238C46.5384 31.3756 46.4663 31.554 46.4359 31.7514C46.3903 32.0589 46.4131 32.3057 46.5042 32.4955C46.6029 32.6853 46.7472 32.8372 46.9294 32.9435C47.123 33.0497 47.3394 33.1219 47.5861 33.1598C47.8329 33.1978 48.0834 33.2168 48.334 33.2168C48.7743 33.2168 49.1843 33.1522 49.5678 33.0232C49.9588 32.9017 50.3118 32.7271 50.6193 32.4955C50.9268 32.2677 51.1811 31.9868 51.3823 31.6603C51.5835 31.3301 51.7164 30.9618 51.7847 30.548C51.8151 30.3431 51.8075 30.1381 51.762 29.9407C51.724 29.7433 51.6595 29.5496 51.5646 29.3674C51.4734 29.1776 51.3596 28.9916 51.2305 28.817C51.109 28.6348 50.9799 28.4525 50.8509 28.2779C50.699 28.0653 50.5472 27.8489 50.4029 27.6364C50.2549 27.4162 50.1334 27.1846 50.0347 26.9492C49.9436 26.7139 49.8828 26.4671 49.8487 26.2166C49.8183 25.966 49.8411 25.6927 49.917 25.4042C50.0309 24.9828 50.2245 24.5804 50.494 24.1894C50.7712 23.7984 51.0976 23.4378 51.4734 23.0999C51.8569 22.7544 52.282 22.4469 52.7414 22.1698C53.2083 21.8965 53.6904 21.6611 54.1839 21.4713C54.6774 21.2815 55.1671 21.1373 55.6607 21.0461C56.1618 20.9474 56.6325 20.9095 57.0804 20.9323C57.3576 20.955 57.5815 21.0158 57.7486 21.1145C57.927 21.2056 58.0599 21.3271 58.151 21.4827C58.2497 21.627 58.3066 21.8016 58.3256 21.999C58.3484 22.1964 58.3408 22.409 58.3028 22.6292C58.2193 23.1113 58.0713 23.5327 57.8663 23.9009C57.6651 24.2615 57.4183 24.5918 57.1146 24.8993L57.0577 24.9449C56.8489 25.0739 56.6401 25.1385 56.4237 25.1385C56.2453 25.1385 56.0972 25.0929 55.9757 25.0018C55.8543 24.9031 55.7518 24.793 55.6758 24.6677C55.5999 24.5387 55.5506 24.4134 55.524 24.2881C55.5012 24.1666 55.505 24.0793 55.5354 24.0262C55.7138 23.9427 55.896 23.8477 56.0896 23.7415C56.2832 23.6276 56.4579 23.5061 56.6211 23.3732C56.7919 23.2442 56.9324 23.1075 57.0463 22.9594C57.1602 22.8076 57.2361 22.6481 57.2665 22.4887C57.2816 22.4052 57.2589 22.3293 57.1981 22.2609C57.145 22.1926 57.0273 22.147 56.8527 22.1243C56.7919 22.1091 56.7312 22.1015 56.6667 22.1015H56.4806C56.2111 22.1015 55.9112 22.1319 55.5809 22.1926C55.2507 22.2458 54.9128 22.3293 54.5674 22.4432C54.2295 22.5494 53.8954 22.6823 53.5652 22.8456C53.2425 23.005 52.9502 23.1986 52.6882 23.4188C52.4263 23.6314 52.2099 23.8743 52.0429 24.1401C51.8796 24.3982 51.7885 24.6867 51.7658 24.998C51.7506 25.203 51.7658 25.4118 51.8113 25.6168C51.8645 25.8142 51.9366 26.0154 52.0315 26.2128C52.1226 26.4026 52.2289 26.5962 52.3428 26.786C52.4643 26.9682 52.5933 27.158 52.7224 27.3478C52.878 27.5832 53.0261 27.8262 53.1703 28.0691C53.326 28.3045 53.4475 28.5588 53.5386 28.8246C53.6373 29.0827 53.7056 29.356 53.736 29.637L53.7436 29.6332ZM70.3482 25.3131C70.3861 25.1612 70.4355 24.9904 70.5 24.8082C70.5683 24.626 70.6481 24.4324 70.7316 24.235C70.8151 24.0376 70.8948 23.8326 70.9745 23.6276C71.0505 23.4226 71.1112 23.2214 71.1606 23.0316L71.3921 22.7924C71.4832 22.7772 71.5933 22.8304 71.7148 22.9518C71.8439 23.0657 71.9654 23.2024 72.0717 23.3656C72.1855 23.5175 72.2804 23.6769 72.3488 23.8364C72.4247 23.9882 72.4551 24.0983 72.4399 24.1704C72.3564 24.3906 72.2577 24.588 72.1514 24.755C72.0527 24.9221 71.9464 25.0967 71.8401 25.2713C71.7338 25.446 71.6199 25.6282 71.506 25.8104C71.3997 25.9926 71.2896 26.209 71.1833 26.4519C71.0922 26.4292 70.9897 26.376 70.8834 26.2925C70.7847 26.2014 70.6898 26.0989 70.6063 25.9812C70.5228 25.8673 70.4507 25.7496 70.3975 25.6244C70.352 25.5029 70.3368 25.4004 70.352 25.3131H70.3482ZM76.3652 28.9119C76.2968 28.8511 76.2057 28.8246 76.0994 28.8322C76.0007 28.8398 75.9058 28.8929 75.8223 28.9916C75.7008 29.1662 75.568 29.356 75.4313 29.5534C75.3022 29.7433 75.1618 29.9331 75.0175 30.1153C74.7404 30.4607 74.4633 30.7568 74.1861 31.0074C73.909 31.2579 73.6433 31.4667 73.3889 31.6262C73.1422 31.778 72.9106 31.8843 72.698 31.9488C72.4892 32.0096 72.3146 32.021 72.1666 31.983L72.1893 31.9944C72.0109 31.9564 71.897 31.8463 71.8439 31.6603C71.7983 31.4781 71.7869 31.2807 71.8097 31.0757C72.5234 30.8555 73.1953 30.5139 73.8179 30.0545C74.4481 29.5952 74.9947 29.022 75.4579 28.3349L75.4465 28.3462C75.5793 28.1716 75.678 28.0046 75.7464 27.8527C75.8223 27.6933 75.8717 27.5339 75.8944 27.382C75.9552 27.0366 75.9058 26.767 75.7464 26.5696C75.5831 26.3646 75.3478 26.2545 75.0289 26.2469C74.729 26.2394 74.4139 26.2925 74.0836 26.4064C73.761 26.5203 73.4497 26.6683 73.1498 26.8543C72.8499 27.0366 72.5727 27.2416 72.3184 27.4617C72.0641 27.6743 71.8515 27.8793 71.6844 28.0691C71.1985 28.6499 70.8227 29.189 70.5532 29.6863C70.5456 29.7015 70.5418 29.7129 70.5342 29.7281C70.4203 29.8647 70.3064 29.9976 70.1887 30.1457C69.9799 30.3886 69.7674 30.624 69.5434 30.8442C69.327 31.0643 69.103 31.2655 68.8639 31.4402C68.6247 31.6072 68.3817 31.7287 68.135 31.8084H68.0553C68.0097 31.8084 68.0097 31.7552 68.0553 31.6489C68.1008 31.5351 68.173 31.387 68.2754 31.201C68.3817 31.0188 68.5108 30.8062 68.6551 30.5708C68.8069 30.3355 68.9664 30.0925 69.1296 29.8495C69.3004 29.599 69.4637 29.3522 69.6269 29.1169C69.7977 28.8739 69.9496 28.6499 70.09 28.4525C70.1432 28.369 70.2039 28.2779 70.276 28.1792C70.3444 28.0805 70.4051 27.9932 70.4621 27.9173C70.5152 27.8414 70.557 27.7806 70.5873 27.7351C70.6177 27.6895 70.6253 27.6743 70.6101 27.6895C70.7088 27.5149 70.7354 27.3327 70.6898 27.1504C70.6443 26.9606 70.5646 26.7936 70.4469 26.6569C70.333 26.5127 70.1963 26.4064 70.0445 26.3343C69.8888 26.2583 69.756 26.2469 69.6421 26.3001L69.4902 26.4368C69.3574 26.7025 69.1979 27.0024 69.0043 27.3289C68.8183 27.6515 68.6285 27.9818 68.4273 28.3273C68.2299 28.6537 68.0363 28.9802 67.8465 29.3067C67.8161 29.3484 67.7819 29.3864 67.7516 29.4282H67.763C67.5921 29.6635 67.4175 29.9103 67.2315 30.1608C67.0455 30.4038 66.8557 30.6392 66.6545 30.8593C66.4533 31.0719 66.2483 31.2693 66.0319 31.444C65.8155 31.611 65.5991 31.7325 65.3751 31.8122H65.2954C65.2954 31.8122 65.3068 31.7932 65.3068 31.778C65.3068 31.7628 65.3144 31.7439 65.3296 31.7211C65.3524 31.5616 65.4207 31.3453 65.5384 31.0795C65.6523 30.8138 65.7965 30.5215 65.9636 30.2102C66.1344 29.8875 66.3166 29.561 66.5178 29.2232C66.719 28.8777 66.9088 28.555 67.0948 28.2475C67.2884 27.9325 67.4631 27.6515 67.6263 27.401C67.7895 27.1504 67.9148 26.9492 68.0059 26.805L68.097 26.6569C68.2603 26.4064 68.4273 26.1369 68.6057 25.8559C68.7917 25.5674 68.9626 25.2865 69.1258 25.0208C69.2966 24.755 69.4409 24.5121 69.5624 24.2995C69.6914 24.0869 69.7863 23.9199 69.8395 23.806C69.9078 23.639 69.9078 23.4643 69.8395 23.2897C69.7711 23.1075 69.6649 22.9443 69.5282 22.8076C69.3991 22.6709 69.2473 22.5722 69.0802 22.5115C68.9208 22.4432 68.7765 22.4394 68.6551 22.5001C68.564 22.7279 68.4463 22.9822 68.3096 23.2555C68.1805 23.5213 68.0325 23.8022 67.8693 24.0907C67.7174 24.3792 67.5504 24.6791 67.3719 24.9828C67.2011 25.2827 67.0303 25.575 66.8519 25.8635L66.2293 26.8278C65.7927 27.5301 65.3638 28.2438 64.95 28.9726C64.9044 29.0523 64.8627 29.1359 64.8209 29.2156C64.8171 29.2232 64.8095 29.227 64.8057 29.2346C64.7526 29.2953 64.7032 29.3598 64.6577 29.4282H64.6691C64.4982 29.6635 64.3236 29.9103 64.1376 30.1608C63.9516 30.4038 63.7618 30.6392 63.5606 30.8593C63.3594 31.0719 63.1544 31.2693 62.938 31.444C62.7216 31.611 62.5052 31.7325 62.2812 31.8122H62.2015C62.2015 31.8122 62.2129 31.7932 62.2129 31.778C62.2129 31.7628 62.2205 31.7439 62.2357 31.7211C62.2585 31.5616 62.3268 31.3453 62.4445 31.0795C62.5584 30.8138 62.7026 30.5215 62.8696 30.2102C63.0405 29.8875 63.2227 29.561 63.4239 29.2232C63.6251 28.8777 63.8149 28.555 64.0009 28.2475C64.1945 27.9325 64.3692 27.6515 64.5324 27.401C64.6956 27.1504 64.8209 26.9492 64.912 26.805L65.0031 26.6569C65.1626 26.4064 65.3334 26.1369 65.5118 25.8559C65.6978 25.5674 65.8687 25.2865 66.0319 25.0208C66.2027 24.755 66.347 24.5121 66.4684 24.2995C66.5975 24.0869 66.6924 23.9199 66.7456 23.806C66.8139 23.639 66.8139 23.4643 66.7456 23.2897C66.6772 23.1075 66.5709 22.9443 66.4343 22.8076C66.3052 22.6709 66.1534 22.5722 65.9863 22.5115C65.8269 22.4432 65.6826 22.4394 65.5612 22.5001C65.47 22.7279 65.3524 22.9822 65.2157 23.2555C65.0866 23.5213 64.9386 23.8022 64.7753 24.0907C64.6235 24.3792 64.4565 24.6791 64.278 24.9828C64.1072 25.2827 63.9364 25.575 63.758 25.8635L63.1354 26.8278C62.695 27.5301 62.2698 28.2438 61.8561 28.9726C61.8029 29.0675 61.7536 29.1624 61.7042 29.2573C61.6776 29.2915 61.6435 29.3333 61.5979 29.375C61.4271 29.6104 61.2487 29.8609 61.0551 30.1191C60.8691 30.3696 60.6754 30.6126 60.4667 30.8404C60.2655 31.0605 60.0605 31.2617 59.8441 31.4364C59.6277 31.611 59.4075 31.7401 59.1759 31.816H59.0962C59.0962 31.816 59.1114 31.8008 59.119 31.7932C59.1342 31.7856 59.1418 31.7742 59.1418 31.759C59.157 31.6603 59.1911 31.5427 59.2443 31.4022C59.305 31.2579 59.3771 31.1061 59.4531 30.9429C59.529 30.7834 59.6125 30.6164 59.696 30.4493C59.7871 30.2823 59.8782 30.1229 59.9618 29.9786C59.9997 29.9103 60.0377 29.8457 60.0756 29.785C60.1136 29.7167 60.1478 29.6559 60.1781 29.6028C60.2237 29.4965 60.2351 29.3864 60.2123 29.2687C60.1971 29.1548 60.1592 29.0448 60.0984 28.9347C60.0377 28.8208 59.9618 28.7183 59.8669 28.6234C59.7757 28.5323 59.6732 28.4525 59.567 28.3842C59.6201 28.407 59.6808 28.4184 59.753 28.4184C59.8289 28.4184 59.9048 28.4146 59.9731 28.407C60.0415 28.3918 60.0984 28.3728 60.1478 28.35C60.2009 28.3197 60.2313 28.2817 60.2389 28.2362C60.2844 28.0388 60.311 27.8376 60.3186 27.6402C60.3338 27.4352 60.3224 27.2416 60.2844 27.0669C60.2541 26.8847 60.1895 26.7253 60.087 26.5962C59.9959 26.4595 59.8555 26.3608 59.6732 26.3001C59.567 26.2697 59.4645 26.2469 59.3733 26.2318C59.2822 26.2166 59.1835 26.209 59.0848 26.209C58.747 26.209 58.4053 26.2811 58.0561 26.4254C57.7182 26.5696 57.3841 26.767 57.0539 27.01C56.7236 27.2529 56.4085 27.5339 56.1086 27.8451C55.8163 28.1602 55.5468 28.4829 55.3 28.8208C55.0533 29.1586 54.8445 29.4927 54.6661 29.8306C54.4876 30.1684 54.3624 30.4759 54.2864 30.7606C54.2485 30.8669 54.2143 31.0036 54.1839 31.1744C54.1612 31.3566 54.1536 31.5578 54.1612 31.7704C54.1763 31.9754 54.2257 32.1728 54.313 32.355C54.3965 32.5373 54.5256 32.7005 54.6926 32.8372C54.8711 32.9662 55.1026 33.0459 55.3949 33.0763C55.7176 33.0687 56.0555 32.951 56.4085 32.7195C56.7616 32.4841 57.1108 32.2032 57.4601 31.8843C57.4221 32.2298 57.4752 32.5145 57.6233 32.7423C57.7789 32.97 58.0371 33.1029 58.4091 33.1333C58.561 33.1409 58.7128 33.1219 58.8571 33.0763C59.0013 33.0384 59.138 32.9852 59.2595 32.9169C59.3885 32.8561 59.5062 32.7916 59.6049 32.7233C59.7112 32.6473 59.8023 32.579 59.8707 32.5183C60.2009 32.2525 60.497 31.9602 60.7779 31.6452C60.7741 31.6717 60.7666 31.6983 60.759 31.7249C60.7286 31.9223 60.721 32.1083 60.7362 32.2753C60.7438 32.4348 60.7741 32.5828 60.8273 32.7119C60.888 32.8334 60.9716 32.9321 61.0816 33.008C61.1879 33.0839 61.3284 33.1257 61.4954 33.1333C61.6397 33.1333 61.7877 33.1105 61.932 33.0649C62.08 33.027 62.2167 32.9776 62.3458 32.9169C62.4748 32.8561 62.5963 32.7916 62.7026 32.7233C62.8089 32.6473 62.9 32.579 62.9683 32.5183C63.2872 32.2563 63.5833 31.9526 63.8718 31.6262C63.8643 31.6603 63.8567 31.6945 63.8491 31.7287C63.8187 31.9261 63.8111 32.1121 63.8263 32.2791C63.8339 32.4386 63.8643 32.5866 63.9174 32.7157C63.9781 32.8372 64.0655 32.9359 64.1718 33.0118C64.278 33.0877 64.4185 33.1295 64.5855 33.1371C64.7336 33.1371 64.8778 33.1143 65.0259 33.0687C65.174 33.0308 65.3106 32.9814 65.4397 32.9207C65.5688 32.8599 65.6902 32.7954 65.7965 32.7271C65.9028 32.6511 65.9939 32.5828 66.0623 32.5221C66.2521 32.3664 66.4343 32.1956 66.6165 32.0134C66.5747 32.3209 66.6051 32.5828 66.7038 32.7954C66.8025 33.0156 67.0037 33.1333 67.3036 33.1409C67.4403 33.1409 67.5845 33.1181 67.7288 33.0725C67.873 33.0346 68.0135 32.9852 68.1426 32.9245C68.2716 32.8637 68.3931 32.7992 68.4994 32.7309C68.6133 32.6549 68.712 32.5904 68.7879 32.5373C69.2093 32.1994 69.6269 31.8084 70.0445 31.3794C70.0027 31.9033 70.09 32.3285 70.3292 32.6436C70.5987 32.989 71.0315 33.1598 71.6313 33.1598C71.7224 33.1598 71.8515 33.1522 72.0109 33.1371C72.1817 33.1295 72.3677 33.0953 72.5765 33.0346C72.7853 32.9814 73.0131 32.8979 73.2561 32.784C73.5028 32.6625 73.7572 32.4955 74.0191 32.2791C74.4633 31.8881 74.8619 31.4895 75.2073 31.0757C75.5604 30.6543 75.8603 30.2747 76.107 29.9293L76.3955 29.5155C76.4866 29.3864 76.5208 29.2725 76.498 29.17C76.4828 29.0637 76.4373 28.984 76.3614 28.9309L76.3652 28.9119ZM72.6145 29.2801C72.8157 28.9802 73.0321 28.7031 73.2713 28.445C73.5104 28.1868 73.7648 27.959 74.0343 27.7692C74.3038 27.5794 74.5771 27.4541 74.8543 27.401C74.9606 27.3706 75.0099 27.4086 74.9909 27.5149C74.9757 27.5604 74.9568 27.6136 74.934 27.6743C74.9188 27.7351 74.8884 27.7958 74.8429 27.8565V27.8451C74.5126 28.3728 74.114 28.8284 73.6433 29.208C73.1725 29.5838 72.6677 29.8799 72.121 30.1001C72.2539 29.842 72.4171 29.5648 72.6183 29.2763L72.6145 29.2801ZM58.8988 28.4222C58.8609 28.574 58.7925 28.7638 58.69 28.984C58.5989 29.1966 58.4926 29.4206 58.3787 29.6483C58.2497 29.823 58.0864 30.0242 57.8928 30.2444C57.7068 30.4645 57.517 30.6771 57.3158 30.8745C57.1222 31.0643 56.94 31.2352 56.7616 31.3794C56.5831 31.5237 56.4389 31.611 56.325 31.6414C56.2035 31.6717 56.1048 31.6793 56.0365 31.6641C55.9682 31.6489 55.915 31.6148 55.8732 31.5616C55.8429 31.5085 55.8277 31.444 55.8277 31.368C55.8277 31.2921 55.8353 31.2124 55.8505 31.1289C55.8657 31.0074 55.8922 30.8859 55.9302 30.7606C55.9682 30.6316 56.0061 30.5253 56.0441 30.438C56.1731 30.1419 56.3516 29.8078 56.5755 29.4396C56.8071 29.0713 57.0615 28.7297 57.3386 28.407C57.6157 28.0843 57.9042 27.8224 58.2041 27.6174C58.504 27.4048 58.7963 27.2985 59.081 27.3061C59.1721 27.3137 59.2481 27.3403 59.3012 27.3858C59.3544 27.4314 59.3923 27.4921 59.4151 27.568C59.4379 27.6364 59.4493 27.7123 59.4493 27.7958C59.4493 27.8793 59.4455 27.959 59.4379 28.035C59.4303 28.0653 59.4265 28.0957 59.4265 28.1261C59.4341 28.1564 59.4341 28.183 59.4265 28.2058C59.4113 28.2513 59.4227 28.2931 59.4607 28.3311C59.3544 28.2703 59.2443 28.2286 59.138 28.2058C59.0393 28.183 58.9482 28.1906 58.8722 28.2286L58.895 28.4108L58.8988 28.4222ZM97.1152 29.637C97.1532 29.9179 97.1342 30.2216 97.0583 30.5443C96.9292 31.0036 96.6749 31.4743 96.2952 31.9526C95.927 32.4348 95.4753 32.8713 94.9476 33.2585C94.4237 33.6495 93.8505 33.9608 93.2279 34.2C92.6053 34.4354 91.9827 34.5455 91.3602 34.5227C91.0223 34.4923 90.6655 34.4088 90.2858 34.2721C89.9176 34.1431 89.5797 33.957 89.2723 33.7217C88.9724 33.4939 88.7294 33.2054 88.5472 32.8637C88.3688 32.5259 88.3118 32.1349 88.3726 31.6831C88.4409 31.1934 88.6231 30.7227 88.9154 30.2747C89.2077 29.8154 89.6709 29.3712 90.3124 28.946L90.2669 28.9574C90.3276 28.9043 90.4453 28.9157 90.6123 28.9916C90.7907 29.0675 90.9654 29.17 91.1438 29.3029C91.3222 29.4244 91.4703 29.5534 91.5917 29.6939C91.7208 29.823 91.774 29.9217 91.7398 29.99L91.4171 30.1722C91.2387 30.2633 91.0641 30.3582 90.8856 30.4569C90.7148 30.5556 90.5554 30.6695 90.3997 30.8024C90.2517 30.9239 90.1264 31.0643 90.0201 31.2276C89.9138 31.3794 89.8417 31.5578 89.8113 31.7552C89.7658 32.0627 89.7885 32.3095 89.8797 32.4993C89.9784 32.6891 90.1226 32.841 90.3048 32.9472C90.4984 33.0535 90.7148 33.1257 90.9616 33.1636C91.2083 33.2016 91.4589 33.2206 91.7094 33.2206C92.1498 33.2206 92.5598 33.156 92.9432 33.027C93.3342 32.9055 93.6872 32.7309 93.9947 32.4993C94.3022 32.2715 94.5566 31.9906 94.7578 31.6641C94.959 31.3339 95.0918 30.9656 95.1602 30.5518C95.1905 30.3469 95.183 30.1419 95.1374 29.9445C95.0994 29.747 95.0349 29.5534 94.94 29.3712C94.8489 29.1814 94.735 28.9954 94.6059 28.8208C94.4806 28.6386 94.3554 28.4563 94.2263 28.2817C94.0744 28.0691 93.9226 27.8527 93.7783 27.6402C93.6303 27.42 93.5088 27.1884 93.4101 26.953C93.319 26.7177 93.2583 26.4709 93.2241 26.2204C93.1937 25.9698 93.2165 25.6965 93.2924 25.408C93.4063 24.9866 93.5999 24.5842 93.8695 24.1932C94.1466 23.8022 94.4731 23.4416 94.8489 23.1037C95.2323 22.7582 95.6575 22.4507 96.1168 22.1736C96.5837 21.9003 97.0659 21.6649 97.5594 21.4751C98.0529 21.2853 98.5426 21.1411 99.0361 21.0499C99.5372 20.9512 100.008 20.9133 100.456 20.9361C100.733 20.9588 100.957 21.0196 101.124 21.1183C101.302 21.2094 101.435 21.3309 101.526 21.4865C101.625 21.6308 101.682 21.8054 101.701 22.0028C101.724 22.2002 101.716 22.4128 101.678 22.633C101.595 23.1151 101.447 23.5365 101.242 23.9047C101.04 24.2653 100.794 24.5956 100.49 24.9031L100.433 24.9486C100.224 25.0777 100.016 25.1423 99.7991 25.1423C99.6207 25.1423 99.4727 25.0967 99.3474 25.0056C99.2259 24.9069 99.1234 24.7968 99.0475 24.6715C98.9716 24.5425 98.9222 24.4172 98.8956 24.2919C98.8729 24.1704 98.8767 24.0831 98.907 24.03C99.0854 23.9464 99.2677 23.8515 99.4613 23.7453C99.6549 23.6314 99.8295 23.5099 99.9927 23.377C100.164 23.2479 100.304 23.1113 100.418 22.9632C100.532 22.8114 100.608 22.6519 100.638 22.4925C100.653 22.409 100.631 22.3331 100.57 22.2647C100.517 22.1964 100.399 22.1508 100.224 22.1281C100.164 22.1129 100.103 22.1053 100.038 22.1053H99.8523C99.5827 22.1053 99.2828 22.1357 98.9526 22.1964C98.6223 22.2495 98.2844 22.3331 97.939 22.4469C97.6011 22.5532 97.2671 22.6861 96.9368 22.8493C96.6141 23.0088 96.3218 23.2024 96.0599 23.4226C95.7979 23.6352 95.5815 23.8781 95.4145 24.1439C95.2513 24.402 95.1602 24.6905 95.1374 25.0018C95.1222 25.2068 95.1374 25.4156 95.1829 25.6206C95.2361 25.818 95.3082 26.0192 95.4031 26.2166C95.4942 26.4064 95.6005 26.6 95.7144 26.7898C95.8359 26.972 95.965 27.1618 96.094 27.3516C96.2497 27.587 96.3977 27.83 96.5458 28.0729C96.6976 28.3083 96.8229 28.5626 96.914 28.8284C97.0127 29.0865 97.081 29.3598 97.1114 29.6408L97.1152 29.637ZM102.745 30.772C102.946 30.4493 103.113 30.1229 103.254 29.785C103.402 29.4396 103.5 29.1055 103.554 28.7752C103.569 28.6917 103.576 28.6196 103.576 28.5588C103.584 28.4981 103.595 28.4374 103.611 28.3766C103.611 28.1868 103.595 28.0122 103.565 27.8603C103.535 27.7085 103.481 27.5794 103.402 27.4693C103.387 27.1732 103.307 26.9037 103.159 26.6683C103.018 26.433 102.798 26.2811 102.491 26.2204C102.168 26.1976 101.838 26.2432 101.5 26.357C101.17 26.4633 100.843 26.6228 100.52 26.8392C100.198 27.0442 99.8864 27.2947 99.5865 27.5832C99.2942 27.8717 99.0323 28.183 98.8007 28.5133C98.5692 28.8436 98.3755 29.1814 98.2123 29.5345C98.0529 29.8799 97.9428 30.214 97.8896 30.5443C97.8745 30.6505 97.8631 30.753 97.8555 30.8555C97.8479 30.9466 97.8441 31.034 97.8441 31.1175C97.8593 31.7894 98.0301 32.2867 98.3528 32.6056C98.6755 32.9283 99.0854 33.0915 99.5865 33.0991C99.8561 33.0991 100.133 33.0384 100.418 32.9169C100.71 32.7954 100.995 32.6322 101.272 32.4234C101.549 32.2108 101.815 31.9602 102.069 31.6793C102.324 31.3908 102.551 31.0871 102.749 30.772H102.745ZM101.143 31.2428C100.949 31.4174 100.756 31.5616 100.555 31.6679C100.353 31.7666 100.164 31.8122 99.9776 31.8046C99.7232 31.7894 99.56 31.6869 99.4802 31.4933C99.4043 31.2959 99.3929 31.0491 99.4461 30.7606C99.4764 30.548 99.5372 30.3165 99.6321 30.0735C99.7308 29.823 99.8523 29.5686 99.9889 29.3181C100.133 29.0675 100.296 28.8246 100.475 28.5968C100.653 28.3614 100.843 28.1451 101.052 27.9552C101.253 27.7806 101.462 27.6326 101.686 27.5187C101.91 27.3972 102.103 27.3289 102.274 27.3137C102.358 27.3137 102.411 27.3213 102.434 27.3365C102.388 27.3592 102.324 27.3972 102.236 27.4503C102.16 27.5035 102.081 27.568 101.993 27.644C101.91 27.7123 101.826 27.7958 101.75 27.8945C101.682 27.9856 101.636 28.0805 101.614 28.1792C101.599 28.2627 101.58 28.3614 101.557 28.4753C101.542 28.5892 101.534 28.6993 101.534 28.8094C101.534 28.9081 101.542 28.9992 101.557 29.0827C101.58 29.1662 101.621 29.2194 101.682 29.2422L102.016 29.0485C102.039 28.9878 102.077 28.9195 102.13 28.8436C102.191 28.7676 102.259 28.6955 102.327 28.6272C102.403 28.5588 102.483 28.5019 102.559 28.4563C102.642 28.4032 102.715 28.3766 102.779 28.3766L102.756 28.4336C102.726 28.6462 102.661 28.8815 102.559 29.1321C102.46 29.3826 102.335 29.6408 102.191 29.8989C102.043 30.1494 101.879 30.3962 101.693 30.6316C101.515 30.8593 101.333 31.0643 101.139 31.239L101.143 31.2428ZM109.886 28.0805C109.924 27.8679 109.939 27.6629 109.931 27.4731C109.924 27.2757 109.882 27.0935 109.806 26.9341C109.73 26.7746 109.612 26.6418 109.46 26.5317C109.316 26.4254 109.123 26.3532 108.883 26.3153C108.538 26.2697 108.158 26.3381 107.741 26.5203C107.327 26.6949 106.917 26.9303 106.518 27.2188C106.488 27.0821 106.424 26.953 106.321 26.8278C106.23 26.7063 106.12 26.6038 105.998 26.5165C105.873 26.4254 105.752 26.3646 105.63 26.3343C105.509 26.2963 105.399 26.3001 105.307 26.3457C105.186 26.6418 105.034 26.9644 104.856 27.3099C104.685 27.6553 104.514 28.0084 104.336 28.3766C104.043 28.9119 103.751 29.4396 103.459 29.9596C103.166 30.4797 102.897 31.0036 102.65 31.5313C102.403 32.0589 102.195 32.5942 102.028 33.1371C101.857 33.6875 101.758 34.2531 101.728 34.834C101.728 34.9403 101.785 35.0428 101.902 35.1453C102.016 35.244 102.149 35.3237 102.293 35.3844C102.43 35.4527 102.567 35.4869 102.696 35.4869C102.825 35.4869 102.904 35.4414 102.927 35.3502C103.003 35.0617 103.075 34.7808 103.136 34.5151C103.197 34.2493 103.261 33.9874 103.333 33.7369C103.402 33.4863 103.478 33.2396 103.554 33.0042C103.63 32.7688 103.724 32.5297 103.831 32.2943C103.914 32.5145 104.062 32.7043 104.267 32.8561C104.476 33.0004 104.757 33.0763 105.11 33.0839C105.531 33.0384 105.964 32.8979 106.401 32.6587C106.841 32.4158 107.255 32.1083 107.646 31.7401C108.044 31.3718 108.413 30.9656 108.743 30.5139C109.081 30.0545 109.358 29.5876 109.574 29.1169C109.722 28.7866 109.825 28.445 109.886 28.0843V28.0805ZM108.454 27.8983C108.417 28.0957 108.333 28.3311 108.2 28.5968C108.067 28.8625 107.904 29.1397 107.703 29.4206C107.509 29.6939 107.297 29.971 107.057 30.2444C106.818 30.5177 106.579 30.7644 106.344 30.977C106.105 31.182 105.873 31.349 105.653 31.4705C105.429 31.592 105.235 31.6452 105.064 31.63C104.886 31.6148 104.78 31.5427 104.742 31.4136C104.704 31.2769 104.696 31.1251 104.719 30.9542C104.734 30.9011 104.746 30.8479 104.753 30.7948C104.768 30.7417 104.784 30.6923 104.799 30.6468C104.799 30.6392 104.806 30.6278 104.822 30.6126H104.833C104.981 30.3317 105.137 30.0356 105.307 29.7319C105.486 29.4168 105.649 29.1245 105.805 28.8511C105.991 28.6613 106.188 28.4791 106.405 28.3121C106.621 28.1451 106.837 28.0008 107.05 27.8869C107.266 27.7654 107.471 27.6743 107.672 27.6136C107.881 27.5528 108.067 27.5263 108.238 27.5339C108.424 27.5415 108.496 27.6629 108.458 27.9021L108.454 27.8983ZM120.34 23.3694C120.454 23.5213 120.549 23.6807 120.618 23.8402C120.693 23.992 120.724 24.1021 120.709 24.1742C120.625 24.3944 120.526 24.5918 120.42 24.7588C120.321 24.9259 120.215 25.1005 120.109 25.2751C120.003 25.4497 119.889 25.632 119.775 25.8142C119.668 25.9964 119.558 26.2128 119.452 26.4557C119.361 26.433 119.258 26.3798 119.152 26.2963C119.053 26.2052 118.959 26.1027 118.875 25.985C118.792 25.8711 118.719 25.7534 118.666 25.6282C118.621 25.5067 118.606 25.4042 118.621 25.3169C118.659 25.165 118.708 24.9942 118.773 24.812C118.841 24.6298 118.921 24.4362 119.004 24.2388C119.088 24.0414 119.167 23.8364 119.247 23.6314C119.327 23.4264 119.384 23.2252 119.433 23.0354L119.665 22.7962C119.756 22.781 119.866 22.8342 119.987 22.9556C120.116 23.0695 120.238 23.2062 120.344 23.3694H120.34ZM126.543 29.3409C126.498 29.2649 126.437 29.2004 126.357 29.1472C126.281 29.0941 126.198 29.0599 126.114 29.0448C126.031 29.022 125.97 29.0296 125.94 29.0675C125.909 29.1207 125.879 29.17 125.849 29.2156C125.818 29.2611 125.773 29.3143 125.712 29.375C125.541 29.6104 125.363 29.8609 125.169 30.1191C124.983 30.3696 124.79 30.6126 124.581 30.8404C124.38 31.0605 124.175 31.2617 123.958 31.4364C123.742 31.611 123.522 31.7401 123.29 31.816H123.21C123.21 31.816 123.226 31.8008 123.233 31.7932C123.248 31.7856 123.256 31.7742 123.256 31.759C123.271 31.6603 123.305 31.5427 123.358 31.4022C123.419 31.2579 123.487 31.1061 123.567 30.9429C123.643 30.7834 123.723 30.6164 123.81 30.4493C123.901 30.2823 123.992 30.1229 124.076 29.9786C124.114 29.9103 124.152 29.8457 124.19 29.785C124.228 29.7167 124.262 29.6559 124.292 29.6028C124.338 29.4965 124.349 29.3864 124.326 29.2687C124.311 29.1548 124.273 29.0448 124.213 28.9347C124.152 28.8208 124.076 28.7183 123.981 28.6234C123.89 28.5323 123.787 28.4525 123.681 28.3842C123.734 28.407 123.795 28.4184 123.867 28.4184C123.943 28.4184 124.019 28.4146 124.087 28.407C124.156 28.3918 124.213 28.3728 124.262 28.35C124.315 28.3197 124.345 28.2817 124.353 28.2362C124.399 28.0388 124.425 27.8376 124.433 27.6402C124.448 27.4352 124.436 27.2416 124.399 27.0669C124.368 26.8847 124.304 26.7253 124.201 26.5962C124.11 26.4595 123.97 26.3608 123.787 26.3001C123.681 26.2697 123.579 26.2469 123.487 26.2318C123.396 26.2166 123.298 26.209 123.199 26.209C122.861 26.209 122.519 26.2811 122.174 26.4254C121.836 26.5696 121.502 26.767 121.172 27.01C120.841 27.2529 120.526 27.5339 120.227 27.8451C119.934 28.1602 119.665 28.4829 119.418 28.8208C119.221 29.0865 119.053 29.356 118.902 29.6218C118.757 29.7926 118.613 29.9672 118.461 30.1494C118.252 30.3924 118.04 30.6278 117.816 30.8479C117.6 31.0681 117.376 31.2693 117.136 31.444C116.897 31.611 116.654 31.7325 116.408 31.8122H116.328C116.282 31.8122 116.282 31.759 116.328 31.6527C116.373 31.5389 116.445 31.3908 116.548 31.2048C116.654 31.0226 116.783 30.81 116.928 30.5746C117.079 30.3393 117.239 30.0963 117.402 29.8533C117.573 29.6028 117.736 29.356 117.899 29.1207C118.07 28.8777 118.222 28.6537 118.363 28.4563C118.416 28.3728 118.476 28.2817 118.549 28.183C118.617 28.0843 118.681 27.997 118.735 27.9211C118.788 27.8452 118.83 27.7844 118.86 27.7389C118.89 27.6933 118.898 27.6781 118.883 27.6933C118.981 27.5187 119.008 27.3365 118.962 27.1542C118.917 26.9644 118.837 26.7974 118.719 26.6607C118.606 26.5165 118.469 26.4102 118.317 26.3381C118.161 26.2621 118.029 26.2507 117.915 26.3039L117.763 26.4406C117.63 26.7063 117.47 27.0062 117.277 27.3327C117.091 27.6553 116.901 27.9856 116.7 28.3311C116.468 28.7145 116.244 29.0941 116.02 29.4775C115.952 29.5648 115.887 29.6559 115.815 29.7433C115.732 29.8571 115.637 29.9748 115.538 30.1001C115.17 30.5746 114.813 30.9466 114.475 31.2238C114.137 31.4971 113.853 31.6945 113.621 31.8084H113.632C113.587 31.8388 113.56 31.8615 113.553 31.8767C113.606 31.6641 113.663 31.4629 113.727 31.2807C113.796 31.0985 113.868 30.9163 113.948 30.7417C114.031 30.567 114.126 30.3886 114.225 30.214C114.331 30.0318 114.449 29.8306 114.57 29.618C114.711 29.375 114.874 29.0827 115.067 28.7486C115.261 28.4032 115.455 28.0388 115.656 27.6477C115.709 27.5263 115.724 27.3858 115.701 27.2226C115.679 27.0631 115.629 26.9113 115.55 26.7746C115.474 26.638 115.379 26.5241 115.272 26.4292C115.174 26.3305 115.067 26.2811 114.961 26.2811C114.699 26.3039 114.434 26.376 114.164 26.4975C113.902 26.619 113.64 26.7708 113.378 26.9568L113.576 26.6607C113.746 26.4026 113.917 26.1293 114.096 25.8483C114.282 25.5598 114.452 25.2827 114.616 25.0246C114.775 24.7588 114.919 24.5159 115.041 24.3033C115.17 24.0907 115.265 23.9237 115.318 23.8098C115.386 23.6428 115.386 23.4681 115.318 23.2935C115.25 23.1113 115.143 22.948 115.007 22.8114C114.874 22.6747 114.726 22.576 114.559 22.5153C114.396 22.4469 114.255 22.4432 114.134 22.5039C114.042 22.7317 113.925 22.986 113.788 23.2593C113.659 23.5251 113.511 23.806 113.352 24.0945C113.196 24.383 113.033 24.6829 112.854 24.9866C112.683 25.2865 112.513 25.5788 112.334 25.8673L111.871 26.6C111.586 27.0669 111.302 27.5377 111.017 28.0084C110.732 28.4829 110.466 28.9574 110.22 29.4282C109.973 29.9027 109.757 30.3772 109.563 30.8479C109.377 31.3225 109.236 31.7932 109.138 32.2563C109.13 32.355 109.183 32.4537 109.297 32.5524C109.404 32.6511 109.529 32.7347 109.665 32.803C109.814 32.8637 109.95 32.8979 110.079 32.9055C110.208 32.9131 110.292 32.8751 110.322 32.7916C110.459 32.2639 110.645 31.7476 110.876 31.2428C111.108 30.7303 111.362 30.2216 111.639 29.7167C111.909 29.4282 112.171 29.1548 112.425 28.9043C112.687 28.6537 112.968 28.4032 113.268 28.1602L113.822 27.6895C113.807 27.773 113.769 27.8831 113.708 28.0236C113.655 28.1526 113.583 28.2931 113.488 28.4487C113.287 28.8094 113.112 29.1321 112.957 29.4244C112.801 29.7053 112.664 29.971 112.543 30.214C112.429 30.4569 112.327 30.6923 112.243 30.9125C112.167 31.1327 112.103 31.3604 112.046 31.5882C111.993 31.8539 111.981 32.0893 112.012 32.2867C112.049 32.4765 112.114 32.636 112.209 32.7574C112.304 32.8789 112.422 32.9662 112.566 33.0194C112.714 33.0801 112.866 33.1105 113.029 33.1105C113.291 33.1105 113.568 33.0194 113.86 32.8372C114.16 32.6473 114.452 32.4158 114.737 32.15C114.794 32.0969 114.847 32.04 114.9 31.9868C114.859 32.2981 114.885 32.5638 114.988 32.7802C115.086 33.0004 115.288 33.1181 115.588 33.1257C115.724 33.1257 115.868 33.1029 116.013 33.0573C116.161 33.0194 116.297 32.97 116.427 32.9093C116.556 32.8485 116.677 32.784 116.783 32.7157C116.897 32.6398 116.996 32.5752 117.072 32.5221C117.478 32.1956 117.88 31.8236 118.283 31.4098C118.275 31.5237 118.275 31.6414 118.279 31.7666C118.294 31.9716 118.344 32.169 118.431 32.3512C118.514 32.5335 118.643 32.6967 118.811 32.8334C118.989 32.9624 119.221 33.0422 119.513 33.0725C119.835 33.0649 120.173 32.9472 120.526 32.7157C120.879 32.4803 121.229 32.1994 121.578 31.8805C121.54 32.226 121.593 32.5107 121.741 32.7385C121.897 32.9662 122.155 33.0991 122.527 33.1295C122.679 33.1371 122.831 33.1181 122.975 33.0725C123.119 33.0346 123.256 32.9814 123.377 32.9131C123.506 32.8523 123.624 32.7878 123.723 32.7195C123.829 32.6436 123.92 32.5752 123.989 32.5145C124.425 32.1614 124.824 31.7704 125.177 31.3339C125.537 30.8897 125.883 30.4456 126.213 29.9938V29.9824L126.547 29.5231C126.593 29.4699 126.593 29.4092 126.547 29.3409H126.543ZM123.024 28.4222C122.986 28.574 122.918 28.7638 122.816 28.984C122.724 29.1966 122.618 29.4206 122.504 29.6483C122.375 29.823 122.212 30.0242 122.018 30.2444C121.832 30.4645 121.642 30.6771 121.441 30.8745C121.248 31.0643 121.065 31.2352 120.887 31.3794C120.709 31.5237 120.564 31.611 120.45 31.6414C120.325 31.6717 120.23 31.6793 120.162 31.6641C120.094 31.6489 120.04 31.6148 119.999 31.5616C119.968 31.5085 119.953 31.444 119.953 31.368C119.953 31.2921 119.961 31.2124 119.976 31.1289C119.991 31.0074 120.018 30.8859 120.056 30.7606C120.094 30.6316 120.132 30.5253 120.17 30.438C120.299 30.1419 120.477 29.8078 120.701 29.4396C120.933 29.0713 121.187 28.7297 121.464 28.407C121.741 28.0843 122.03 27.8224 122.33 27.6174C122.629 27.4048 122.922 27.2985 123.207 27.3061C123.298 27.3137 123.37 27.3403 123.427 27.3858C123.48 27.4314 123.518 27.4921 123.541 27.568C123.563 27.6364 123.575 27.7123 123.575 27.7958C123.575 27.8793 123.571 27.959 123.563 28.035C123.556 28.0653 123.552 28.0957 123.552 28.1261C123.56 28.1564 123.56 28.183 123.552 28.2058C123.537 28.2513 123.548 28.2931 123.586 28.3311C123.48 28.2703 123.37 28.2286 123.263 28.2058C123.165 28.183 123.074 28.1906 122.998 28.2286L123.021 28.4108L123.024 28.4222ZM85.9923 27.9059C85.8822 27.8717 85.7646 27.8489 85.6355 27.8489C84.956 27.8489 84.0525 28.407 83.3654 29.4661C82.6023 28.3311 81.7406 26.7632 82.0405 25.7724C82.162 25.3738 82.553 24.831 83.2629 24.831C84.0449 24.831 83.9841 25.4573 83.8816 25.7648C83.6387 26.6 83.1528 26.991 83.0655 27.3441C83.483 27.3441 84.7206 27.1656 85.161 25.8218C85.4267 25.0701 85.3811 23.8515 83.7184 23.8515C82.5682 23.8515 81.0535 24.5614 80.6283 25.9736C80.4765 26.5051 80.484 27.1163 80.6321 27.754C79.3869 28.2817 78.3961 29.3788 78.0241 30.6088C77.5078 32.3057 78.6049 33.2851 80.0057 33.2851C81.0838 33.2851 82.0671 32.6967 82.8681 31.8577C83.3616 32.412 83.8816 32.9548 84.4511 33.437L85.5634 32.0589C85.1116 31.7325 84.4852 30.9163 84.0525 30.4076C84.2081 29.6559 84.9294 29.4054 85.5368 29.4054C85.7494 29.4054 85.9468 29.4434 86.1062 29.4889C86.5048 28.8436 86.6415 28.1337 85.9961 27.9097L85.9923 27.9059ZM80.6814 31.797C79.888 31.797 79.3907 31.3149 79.6223 30.548C79.8045 29.9331 80.4157 29.3333 81.0383 28.9802C81.3648 29.747 81.8241 30.4987 82.3328 31.182C81.8848 31.5844 81.285 31.797 80.6814 31.797Z" fill="#859CA2"></path>
+    <path d="M34.7929 32.6473C35.2295 32.4044 35.6471 32.0969 36.0381 31.7287C36.4367 31.3604 36.8011 30.9542 37.1352 30.5025C37.473 30.0432 37.7502 29.5762 37.9666 29.1055C38.1146 28.7752 38.2171 28.4336 38.2778 28.0729C38.3158 27.8603 38.331 27.6553 38.3234 27.4655C38.3158 27.2681 38.274 27.0859 38.1981 26.9265C38.1222 26.767 38.0045 26.6342 37.8527 26.5241C37.7046 26.4178 37.5148 26.3457 37.2756 26.3077C37.0061 26.2697 36.71 26.3077 36.3873 26.4216C36.0647 26.5279 35.742 26.6797 35.4193 26.8809L35.5674 26.6531C35.7382 26.395 35.909 26.1217 36.0874 25.8408C36.2734 25.5522 36.4443 25.2751 36.6075 25.017C36.7707 24.7512 36.9112 24.5083 37.0327 24.2957C37.1656 24.0831 37.2567 23.9161 37.3098 23.8022C37.3781 23.6352 37.3781 23.4605 37.3098 23.2859C37.2415 23.1037 37.1352 22.9405 36.9985 22.8038C36.8695 22.6671 36.7176 22.5684 36.5506 22.5077C36.3873 22.4394 36.2469 22.4356 36.1254 22.4963C36.0343 22.7241 35.9166 22.9784 35.7799 23.2517C35.6509 23.5175 35.5028 23.7984 35.3434 24.0869C35.1877 24.3754 35.0245 24.6753 34.8461 24.979C34.6752 25.2789 34.5044 25.5712 34.326 25.8597L33.8629 26.5924C33.5781 27.0593 33.2934 27.5301 33.0087 28.0008C32.724 28.4753 32.4583 28.9498 32.2115 29.4206C31.9648 29.8951 31.7446 30.3696 31.5548 30.8404C31.3687 31.3149 31.2283 31.7856 31.1296 32.2487C31.122 32.3474 31.1751 32.4462 31.2928 32.5449C31.3991 32.6436 31.5244 32.7271 31.6611 32.7954C31.8091 32.8561 31.9458 32.8903 32.0748 32.8979C32.2039 32.9055 32.2874 32.8675 32.3178 32.784L32.3747 32.5562C32.481 32.7005 32.6291 32.8182 32.8113 32.9131C33.0049 33.0042 33.2327 33.0535 33.5022 33.0611C33.9236 33.0156 34.3564 32.8751 34.7929 32.636V32.6473ZM33.096 31.3756C33.0581 31.2162 33.0543 31.0416 33.0846 30.8593C33.0846 30.829 33.0922 30.7834 33.1074 30.7227C33.2517 30.4228 33.4073 30.1305 33.5667 29.842C33.73 29.5458 33.897 29.2535 34.0754 28.9726C34.2615 28.7676 34.4627 28.5702 34.6866 28.388C34.9106 28.2058 35.1308 28.0463 35.3548 27.9173C35.5863 27.7882 35.8103 27.6895 36.0229 27.6212C36.2469 27.5528 36.4443 27.5225 36.6227 27.5301C36.8087 27.5377 36.8808 27.6591 36.8429 27.8983C36.8049 28.0957 36.7214 28.3311 36.5885 28.5968C36.4595 28.8625 36.2924 29.1397 36.0912 29.4206C35.8976 29.6939 35.685 29.971 35.4459 30.2444C35.2067 30.5177 34.9676 30.7644 34.7322 30.977C34.493 31.182 34.2615 31.349 34.0413 31.4705C33.8173 31.592 33.6237 31.6452 33.4529 31.63C33.2593 31.6148 33.1416 31.5313 33.096 31.3794V31.3756ZM43.5204 26.6645C43.3837 26.5279 43.2281 26.4292 43.0573 26.3684C42.894 26.3001 42.7574 26.2925 42.6435 26.3457C42.4195 26.8581 42.1955 27.3554 41.964 27.8338C41.74 28.3083 41.5198 28.7562 41.3072 29.1738L41.1098 29.4244H41.1212C40.9504 29.6597 40.7757 29.9065 40.5897 30.157C40.4037 30.4 40.2139 30.6354 40.0127 30.8555C39.8115 31.0681 39.6065 31.2655 39.3901 31.4402C39.1737 31.6072 38.9574 31.7287 38.7334 31.8084H38.6309C38.6309 31.8084 38.6461 31.778 38.6764 31.7173C38.6992 31.5578 38.7676 31.3415 38.8852 31.0757C39.0067 30.8024 39.151 30.5101 39.3104 30.2064C39.4736 29.9027 39.6407 29.5952 39.8191 29.2877C40.0051 28.9726 40.1721 28.6917 40.3278 28.4412L40.3164 28.4525C40.4227 28.2779 40.5176 28.1185 40.5935 27.9818C40.6695 27.8452 40.7264 27.7427 40.7681 27.6705C40.8441 27.4959 40.8517 27.3137 40.7909 27.1315C40.7378 26.9492 40.6429 26.7822 40.5138 26.638C40.3923 26.4937 40.2481 26.3874 40.0886 26.3153C39.9368 26.2469 39.8001 26.2394 39.6862 26.2925L39.5496 26.4519C39.4509 26.6873 39.3142 26.9872 39.1472 27.3441C38.9801 27.6971 38.7979 28.0653 38.6043 28.4563C38.4904 28.6993 38.3689 28.9498 38.2475 29.2004C38.126 29.4434 38.0045 29.6863 37.8906 29.9217C37.7767 30.1494 37.6704 30.3772 37.5793 30.5974C37.4882 30.81 37.4085 31.0036 37.3478 31.1706C37.3174 31.2541 37.2908 31.3453 37.268 31.444C37.2529 31.5427 37.2377 31.6338 37.2225 31.7173C37.1618 32.1007 37.1845 32.4234 37.2908 32.6929C37.4047 32.9586 37.6287 33.1029 37.959 33.1181C38.107 33.1181 38.2513 33.0953 38.3993 33.0497C38.5474 33.0118 38.684 32.9624 38.8131 32.9017C38.946 32.841 39.0637 32.7764 39.17 32.7081C39.2762 32.6322 39.3674 32.5638 39.4357 32.5031L39.6445 32.3323C39.4964 32.5828 39.3522 32.8296 39.2079 33.0649C39.0712 33.3079 38.927 33.5546 38.7827 33.7976C38.6347 33.7369 38.4904 33.6799 38.3462 33.6268C38.2095 33.5812 38.0615 33.5395 37.9058 33.5015C37.754 33.4711 37.5793 33.4446 37.3857 33.4218C37.1997 33.4066 36.9909 33.399 36.7518 33.399C36.319 33.399 35.8976 33.4673 35.4838 33.604C35.07 33.7482 34.6904 33.9494 34.3526 34.2C34.0071 34.4581 33.7186 34.7618 33.487 35.1073C33.2479 35.4603 33.096 35.8362 33.0239 36.2424C32.9707 36.565 32.9935 36.8346 33.0922 37.0547C33.1833 37.2749 33.3276 37.4571 33.5174 37.5938C33.7034 37.7305 33.9236 37.8292 34.1855 37.8899C34.4399 37.9582 34.7056 37.9924 34.9827 37.9924C35.8521 37.9924 36.6113 37.7988 37.268 37.4078C37.921 37.0168 38.5322 36.4701 39.1016 35.7678L39.69 36.2841L40.1152 36.6751C40.1608 36.7055 40.2329 36.7131 40.3354 36.6979C40.4417 36.6827 40.5594 36.6485 40.6808 36.5954C40.8099 36.5423 40.939 36.4777 41.0605 36.4018C41.1895 36.3335 41.2996 36.2575 41.3831 36.174C41.4667 36.0905 41.5236 36.007 41.5464 35.9235C41.5767 35.84 41.554 35.7678 41.478 35.7071C41.4477 35.6843 41.4211 35.6577 41.3983 35.6274C41.3755 35.597 41.3528 35.5704 41.33 35.5476V35.5704C41.1136 35.3806 40.8972 35.1908 40.6846 35.0086C40.4682 34.834 40.2443 34.6631 40.0165 34.5037C40.2405 34.1582 40.4569 33.7976 40.6732 33.4142C40.8972 33.0308 41.1212 32.6284 41.3528 32.1994L43.8203 27.6743C43.8962 27.4997 43.9 27.3213 43.8317 27.1466C43.7709 26.9644 43.6722 26.8012 43.5318 26.6645H43.5204ZM37.1997 35.8551C36.953 36.1057 36.7062 36.3259 36.4595 36.5081C36.2127 36.6903 35.9622 36.8346 35.7116 36.9333C35.4573 37.032 35.1991 37.0813 34.9372 37.0813C34.8081 37.0813 34.6714 37.0661 34.5348 37.0358C34.3981 37.013 34.2728 36.9674 34.1665 36.8991C34.0603 36.8384 33.9729 36.751 33.9122 36.6372C33.8515 36.5309 33.8363 36.3904 33.8667 36.212C33.897 35.9614 34.0109 35.7413 34.2007 35.559C34.3867 35.3768 34.6069 35.2212 34.8688 35.0997C35.1232 34.9782 35.4003 34.8871 35.7002 34.8264C36.0001 34.7732 36.2772 34.7466 36.5316 34.7466C37.0555 34.7542 37.511 34.8454 37.9058 35.02C37.6742 35.3275 37.4389 35.6046 37.2035 35.8551H37.1997ZM53.7436 29.6332C53.7815 29.9141 53.7626 30.2178 53.6866 30.5405C53.5576 30.9998 53.3032 31.4705 52.9236 31.9488C52.5554 32.431 52.1036 32.8675 51.5721 33.2547C51.0483 33.6458 50.475 33.957 49.8525 34.1962C49.2299 34.4316 48.6073 34.5417 47.9847 34.5189C47.6469 34.4885 47.29 34.405 46.9104 34.2683C46.5422 34.1393 46.2043 33.9532 45.8968 33.7179C45.5969 33.4901 45.354 33.2016 45.1717 32.8599C44.9933 32.5221 44.9364 32.1311 44.9971 31.6793C45.0655 31.1896 45.2477 30.7189 45.54 30.2709C45.8323 29.8116 46.2954 29.3674 46.937 28.9423L46.8914 28.9536C46.9522 28.9005 47.0699 28.9119 47.2369 28.9878C47.4153 29.0637 47.5899 29.1662 47.7684 29.2991C47.9468 29.4206 48.0948 29.5496 48.2163 29.6901C48.3454 29.8192 48.3985 29.9179 48.3644 29.9862L48.0417 30.1684C47.8633 30.2595 47.6886 30.3544 47.5102 30.4531C47.3394 30.5518 47.1799 30.6657 47.0243 30.7986C46.8762 30.9201 46.751 31.0605 46.6447 31.2238C46.5384 31.3756 46.4663 31.554 46.4359 31.7514C46.3903 32.0589 46.4131 32.3057 46.5042 32.4955C46.6029 32.6853 46.7472 32.8372 46.9294 32.9435C47.123 33.0497 47.3394 33.1219 47.5861 33.1598C47.8329 33.1978 48.0834 33.2168 48.334 33.2168C48.7743 33.2168 49.1843 33.1522 49.5678 33.0232C49.9588 32.9017 50.3118 32.7271 50.6193 32.4955C50.9268 32.2677 51.1811 31.9868 51.3823 31.6603C51.5835 31.3301 51.7164 30.9618 51.7847 30.548C51.8151 30.3431 51.8075 30.1381 51.762 29.9407C51.724 29.7433 51.6595 29.5496 51.5646 29.3674C51.4734 29.1776 51.3596 28.9916 51.2305 28.817C51.109 28.6348 50.9799 28.4525 50.8509 28.2779C50.699 28.0653 50.5472 27.8489 50.4029 27.6364C50.2549 27.4162 50.1334 27.1846 50.0347 26.9492C49.9436 26.7139 49.8828 26.4671 49.8487 26.2166C49.8183 25.966 49.8411 25.6927 49.917 25.4042C50.0309 24.9828 50.2245 24.5804 50.494 24.1894C50.7712 23.7984 51.0976 23.4378 51.4734 23.0999C51.8569 22.7544 52.282 22.4469 52.7414 22.1698C53.2083 21.8965 53.6904 21.6611 54.1839 21.4713C54.6774 21.2815 55.1671 21.1373 55.6607 21.0461C56.1618 20.9474 56.6325 20.9095 57.0804 20.9323C57.3576 20.955 57.5815 21.0158 57.7486 21.1145C57.927 21.2056 58.0599 21.3271 58.151 21.4827C58.2497 21.627 58.3066 21.8016 58.3256 21.999C58.3484 22.1964 58.3408 22.409 58.3028 22.6292C58.2193 23.1113 58.0713 23.5327 57.8663 23.9009C57.6651 24.2615 57.4183 24.5918 57.1146 24.8993L57.0577 24.9449C56.8489 25.0739 56.6401 25.1385 56.4237 25.1385C56.2453 25.1385 56.0972 25.0929 55.9757 25.0018C55.8543 24.9031 55.7518 24.793 55.6758 24.6677C55.5999 24.5387 55.5506 24.4134 55.524 24.2881C55.5012 24.1666 55.505 24.0793 55.5354 24.0262C55.7138 23.9427 55.896 23.8477 56.0896 23.7415C56.2832 23.6276 56.4579 23.5061 56.6211 23.3732C56.7919 23.2442 56.9324 23.1075 57.0463 22.9594C57.1602 22.8076 57.2361 22.6481 57.2665 22.4887C57.2816 22.4052 57.2589 22.3293 57.1981 22.2609C57.145 22.1926 57.0273 22.147 56.8527 22.1243C56.7919 22.1091 56.7312 22.1015 56.6667 22.1015H56.4806C56.2111 22.1015 55.9112 22.1319 55.5809 22.1926C55.2507 22.2458 54.9128 22.3293 54.5674 22.4432C54.2295 22.5494 53.8954 22.6823 53.5652 22.8456C53.2425 23.005 52.9502 23.1986 52.6882 23.4188C52.4263 23.6314 52.2099 23.8743 52.0429 24.1401C51.8796 24.3982 51.7885 24.6867 51.7658 24.998C51.7506 25.203 51.7658 25.4118 51.8113 25.6168C51.8645 25.8142 51.9366 26.0154 52.0315 26.2128C52.1226 26.4026 52.2289 26.5962 52.3428 26.786C52.4643 26.9682 52.5933 27.158 52.7224 27.3478C52.878 27.5832 53.0261 27.8262 53.1703 28.0691C53.326 28.3045 53.4475 28.5588 53.5386 28.8246C53.6373 29.0827 53.7056 29.356 53.736 29.637L53.7436 29.6332ZM70.3482 25.3131C70.3861 25.1612 70.4355 24.9904 70.5 24.8082C70.5683 24.626 70.6481 24.4324 70.7316 24.235C70.8151 24.0376 70.8948 23.8326 70.9745 23.6276C71.0505 23.4226 71.1112 23.2214 71.1606 23.0316L71.3921 22.7924C71.4832 22.7772 71.5933 22.8304 71.7148 22.9518C71.8439 23.0657 71.9654 23.2024 72.0717 23.3656C72.1855 23.5175 72.2804 23.6769 72.3488 23.8364C72.4247 23.9882 72.4551 24.0983 72.4399 24.1704C72.3564 24.3906 72.2577 24.588 72.1514 24.755C72.0527 24.9221 71.9464 25.0967 71.8401 25.2713C71.7338 25.446 71.6199 25.6282 71.506 25.8104C71.3997 25.9926 71.2896 26.209 71.1833 26.4519C71.0922 26.4292 70.9897 26.376 70.8834 26.2925C70.7847 26.2014 70.6898 26.0989 70.6063 25.9812C70.5228 25.8673 70.4507 25.7496 70.3975 25.6244C70.352 25.5029 70.3368 25.4004 70.352 25.3131H70.3482ZM76.3652 28.9119C76.2968 28.8511 76.2057 28.8246 76.0994 28.8322C76.0007 28.8398 75.9058 28.8929 75.8223 28.9916C75.7008 29.1662 75.568 29.356 75.4313 29.5534C75.3022 29.7433 75.1618 29.9331 75.0175 30.1153C74.7404 30.4607 74.4633 30.7568 74.1861 31.0074C73.909 31.2579 73.6433 31.4667 73.3889 31.6262C73.1422 31.778 72.9106 31.8843 72.698 31.9488C72.4892 32.0096 72.3146 32.021 72.1666 31.983L72.1893 31.9944C72.0109 31.9564 71.897 31.8463 71.8439 31.6603C71.7983 31.4781 71.7869 31.2807 71.8097 31.0757C72.5234 30.8555 73.1953 30.5139 73.8179 30.0545C74.4481 29.5952 74.9947 29.022 75.4579 28.3349L75.4465 28.3462C75.5793 28.1716 75.678 28.0046 75.7464 27.8527C75.8223 27.6933 75.8717 27.5339 75.8944 27.382C75.9552 27.0366 75.9058 26.767 75.7464 26.5696C75.5831 26.3646 75.3478 26.2545 75.0289 26.2469C74.729 26.2394 74.4139 26.2925 74.0836 26.4064C73.761 26.5203 73.4497 26.6683 73.1498 26.8543C72.8499 27.0366 72.5727 27.2416 72.3184 27.4617C72.0641 27.6743 71.8515 27.8793 71.6844 28.0691C71.1985 28.6499 70.8227 29.189 70.5532 29.6863C70.5456 29.7015 70.5418 29.7129 70.5342 29.7281C70.4203 29.8647 70.3064 29.9976 70.1887 30.1457C69.9799 30.3886 69.7674 30.624 69.5434 30.8442C69.327 31.0643 69.103 31.2655 68.8639 31.4402C68.6247 31.6072 68.3817 31.7287 68.135 31.8084H68.0553C68.0097 31.8084 68.0097 31.7552 68.0553 31.6489C68.1008 31.5351 68.173 31.387 68.2754 31.201C68.3817 31.0188 68.5108 30.8062 68.6551 30.5708C68.8069 30.3355 68.9664 30.0925 69.1296 29.8495C69.3004 29.599 69.4637 29.3522 69.6269 29.1169C69.7977 28.8739 69.9496 28.6499 70.09 28.4525C70.1432 28.369 70.2039 28.2779 70.276 28.1792C70.3444 28.0805 70.4051 27.9932 70.4621 27.9173C70.5152 27.8414 70.557 27.7806 70.5873 27.7351C70.6177 27.6895 70.6253 27.6743 70.6101 27.6895C70.7088 27.5149 70.7354 27.3327 70.6898 27.1504C70.6443 26.9606 70.5646 26.7936 70.4469 26.6569C70.333 26.5127 70.1963 26.4064 70.0445 26.3343C69.8888 26.2583 69.756 26.2469 69.6421 26.3001L69.4902 26.4368C69.3574 26.7025 69.1979 27.0024 69.0043 27.3289C68.8183 27.6515 68.6285 27.9818 68.4273 28.3273C68.2299 28.6537 68.0363 28.9802 67.8465 29.3067C67.8161 29.3484 67.7819 29.3864 67.7516 29.4282H67.763C67.5921 29.6635 67.4175 29.9103 67.2315 30.1608C67.0455 30.4038 66.8557 30.6392 66.6545 30.8593C66.4533 31.0719 66.2483 31.2693 66.0319 31.444C65.8155 31.611 65.5991 31.7325 65.3751 31.8122H65.2954C65.2954 31.8122 65.3068 31.7932 65.3068 31.778C65.3068 31.7628 65.3144 31.7439 65.3296 31.7211C65.3524 31.5616 65.4207 31.3453 65.5384 31.0795C65.6523 30.8138 65.7965 30.5215 65.9636 30.2102C66.1344 29.8875 66.3166 29.561 66.5178 29.2232C66.719 28.8777 66.9088 28.555 67.0948 28.2475C67.2884 27.9325 67.4631 27.6515 67.6263 27.401C67.7895 27.1504 67.9148 26.9492 68.0059 26.805L68.097 26.6569C68.2603 26.4064 68.4273 26.1369 68.6057 25.8559C68.7917 25.5674 68.9626 25.2865 69.1258 25.0208C69.2966 24.755 69.4409 24.5121 69.5624 24.2995C69.6914 24.0869 69.7863 23.9199 69.8395 23.806C69.9078 23.639 69.9078 23.4643 69.8395 23.2897C69.7711 23.1075 69.6649 22.9443 69.5282 22.8076C69.3991 22.6709 69.2473 22.5722 69.0802 22.5115C68.9208 22.4432 68.7765 22.4394 68.6551 22.5001C68.564 22.7279 68.4463 22.9822 68.3096 23.2555C68.1805 23.5213 68.0325 23.8022 67.8693 24.0907C67.7174 24.3792 67.5504 24.6791 67.3719 24.9828C67.2011 25.2827 67.0303 25.575 66.8519 25.8635L66.2293 26.8278C65.7927 27.5301 65.3638 28.2438 64.95 28.9726C64.9044 29.0523 64.8627 29.1359 64.8209 29.2156C64.8171 29.2232 64.8095 29.227 64.8057 29.2346C64.7526 29.2953 64.7032 29.3598 64.6577 29.4282H64.6691C64.4982 29.6635 64.3236 29.9103 64.1376 30.1608C63.9516 30.4038 63.7618 30.6392 63.5606 30.8593C63.3594 31.0719 63.1544 31.2693 62.938 31.444C62.7216 31.611 62.5052 31.7325 62.2812 31.8122H62.2015C62.2015 31.8122 62.2129 31.7932 62.2129 31.778C62.2129 31.7628 62.2205 31.7439 62.2357 31.7211C62.2585 31.5616 62.3268 31.3453 62.4445 31.0795C62.5584 30.8138 62.7026 30.5215 62.8696 30.2102C63.0405 29.8875 63.2227 29.561 63.4239 29.2232C63.6251 28.8777 63.8149 28.555 64.0009 28.2475C64.1945 27.9325 64.3692 27.6515 64.5324 27.401C64.6956 27.1504 64.8209 26.9492 64.912 26.805L65.0031 26.6569C65.1626 26.4064 65.3334 26.1369 65.5118 25.8559C65.6978 25.5674 65.8687 25.2865 66.0319 25.0208C66.2027 24.755 66.347 24.5121 66.4684 24.2995C66.5975 24.0869 66.6924 23.9199 66.7456 23.806C66.8139 23.639 66.8139 23.4643 66.7456 23.2897C66.6772 23.1075 66.5709 22.9443 66.4343 22.8076C66.3052 22.6709 66.1534 22.5722 65.9863 22.5115C65.8269 22.4432 65.6826 22.4394 65.5612 22.5001C65.47 22.7279 65.3524 22.9822 65.2157 23.2555C65.0866 23.5213 64.9386 23.8022 64.7753 24.0907C64.6235 24.3792 64.4565 24.6791 64.278 24.9828C64.1072 25.2827 63.9364 25.575 63.758 25.8635L63.1354 26.8278C62.695 27.5301 62.2698 28.2438 61.8561 28.9726C61.8029 29.0675 61.7536 29.1624 61.7042 29.2573C61.6776 29.2915 61.6435 29.3333 61.5979 29.375C61.4271 29.6104 61.2487 29.8609 61.0551 30.1191C60.8691 30.3696 60.6754 30.6126 60.4667 30.8404C60.2655 31.0605 60.0605 31.2617 59.8441 31.4364C59.6277 31.611 59.4075 31.7401 59.1759 31.816H59.0962C59.0962 31.816 59.1114 31.8008 59.119 31.7932C59.1342 31.7856 59.1418 31.7742 59.1418 31.759C59.157 31.6603 59.1911 31.5427 59.2443 31.4022C59.305 31.2579 59.3771 31.1061 59.4531 30.9429C59.529 30.7834 59.6125 30.6164 59.696 30.4493C59.7871 30.2823 59.8782 30.1229 59.9618 29.9786C59.9997 29.9103 60.0377 29.8457 60.0756 29.785C60.1136 29.7167 60.1478 29.6559 60.1781 29.6028C60.2237 29.4965 60.2351 29.3864 60.2123 29.2687C60.1971 29.1548 60.1592 29.0448 60.0984 28.9347C60.0377 28.8208 59.9618 28.7183 59.8669 28.6234C59.7757 28.5323 59.6732 28.4525 59.567 28.3842C59.6201 28.407 59.6808 28.4184 59.753 28.4184C59.8289 28.4184 59.9048 28.4146 59.9731 28.407C60.0415 28.3918 60.0984 28.3728 60.1478 28.35C60.2009 28.3197 60.2313 28.2817 60.2389 28.2362C60.2844 28.0388 60.311 27.8376 60.3186 27.6402C60.3338 27.4352 60.3224 27.2416 60.2844 27.0669C60.2541 26.8847 60.1895 26.7253 60.087 26.5962C59.9959 26.4595 59.8555 26.3608 59.6732 26.3001C59.567 26.2697 59.4645 26.2469 59.3733 26.2318C59.2822 26.2166 59.1835 26.209 59.0848 26.209C58.747 26.209 58.4053 26.2811 58.0561 26.4254C57.7182 26.5696 57.3841 26.767 57.0539 27.01C56.7236 27.2529 56.4085 27.5339 56.1086 27.8451C55.8163 28.1602 55.5468 28.4829 55.3 28.8208C55.0533 29.1586 54.8445 29.4927 54.6661 29.8306C54.4876 30.1684 54.3624 30.4759 54.2864 30.7606C54.2485 30.8669 54.2143 31.0036 54.1839 31.1744C54.1612 31.3566 54.1536 31.5578 54.1612 31.7704C54.1763 31.9754 54.2257 32.1728 54.313 32.355C54.3965 32.5373 54.5256 32.7005 54.6926 32.8372C54.8711 32.9662 55.1026 33.0459 55.3949 33.0763C55.7176 33.0687 56.0555 32.951 56.4085 32.7195C56.7616 32.4841 57.1108 32.2032 57.4601 31.8843C57.4221 32.2298 57.4752 32.5145 57.6233 32.7423C57.7789 32.97 58.0371 33.1029 58.4091 33.1333C58.561 33.1409 58.7128 33.1219 58.8571 33.0763C59.0013 33.0384 59.138 32.9852 59.2595 32.9169C59.3885 32.8561 59.5062 32.7916 59.6049 32.7233C59.7112 32.6473 59.8023 32.579 59.8707 32.5183C60.2009 32.2525 60.497 31.9602 60.7779 31.6452C60.7741 31.6717 60.7666 31.6983 60.759 31.7249C60.7286 31.9223 60.721 32.1083 60.7362 32.2753C60.7438 32.4348 60.7741 32.5828 60.8273 32.7119C60.888 32.8334 60.9716 32.9321 61.0816 33.008C61.1879 33.0839 61.3284 33.1257 61.4954 33.1333C61.6397 33.1333 61.7877 33.1105 61.932 33.0649C62.08 33.027 62.2167 32.9776 62.3458 32.9169C62.4748 32.8561 62.5963 32.7916 62.7026 32.7233C62.8089 32.6473 62.9 32.579 62.9683 32.5183C63.2872 32.2563 63.5833 31.9526 63.8718 31.6262C63.8643 31.6603 63.8567 31.6945 63.8491 31.7287C63.8187 31.9261 63.8111 32.1121 63.8263 32.2791C63.8339 32.4386 63.8643 32.5866 63.9174 32.7157C63.9781 32.8372 64.0655 32.9359 64.1718 33.0118C64.278 33.0877 64.4185 33.1295 64.5855 33.1371C64.7336 33.1371 64.8778 33.1143 65.0259 33.0687C65.174 33.0308 65.3106 32.9814 65.4397 32.9207C65.5688 32.8599 65.6902 32.7954 65.7965 32.7271C65.9028 32.6511 65.9939 32.5828 66.0623 32.5221C66.2521 32.3664 66.4343 32.1956 66.6165 32.0134C66.5747 32.3209 66.6051 32.5828 66.7038 32.7954C66.8025 33.0156 67.0037 33.1333 67.3036 33.1409C67.4403 33.1409 67.5845 33.1181 67.7288 33.0725C67.873 33.0346 68.0135 32.9852 68.1426 32.9245C68.2716 32.8637 68.3931 32.7992 68.4994 32.7309C68.6133 32.6549 68.712 32.5904 68.7879 32.5373C69.2093 32.1994 69.6269 31.8084 70.0445 31.3794C70.0027 31.9033 70.09 32.3285 70.3292 32.6436C70.5987 32.989 71.0315 33.1598 71.6313 33.1598C71.7224 33.1598 71.8515 33.1522 72.0109 33.1371C72.1817 33.1295 72.3677 33.0953 72.5765 33.0346C72.7853 32.9814 73.0131 32.8979 73.2561 32.784C73.5028 32.6625 73.7572 32.4955 74.0191 32.2791C74.4633 31.8881 74.8619 31.4895 75.2073 31.0757C75.5604 30.6543 75.8603 30.2747 76.107 29.9293L76.3955 29.5155C76.4866 29.3864 76.5208 29.2725 76.498 29.17C76.4828 29.0637 76.4373 28.984 76.3614 28.9309L76.3652 28.9119ZM72.6145 29.2801C72.8157 28.9802 73.0321 28.7031 73.2713 28.445C73.5104 28.1868 73.7648 27.959 74.0343 27.7692C74.3038 27.5794 74.5771 27.4541 74.8543 27.401C74.9606 27.3706 75.0099 27.4086 74.9909 27.5149C74.9757 27.5604 74.9568 27.6136 74.934 27.6743C74.9188 27.7351 74.8884 27.7958 74.8429 27.8565V27.8451C74.5126 28.3728 74.114 28.8284 73.6433 29.208C73.1725 29.5838 72.6677 29.8799 72.121 30.1001C72.2539 29.842 72.4171 29.5648 72.6183 29.2763L72.6145 29.2801ZM58.8988 28.4222C58.8609 28.574 58.7925 28.7638 58.69 28.984C58.5989 29.1966 58.4926 29.4206 58.3787 29.6483C58.2497 29.823 58.0864 30.0242 57.8928 30.2444C57.7068 30.4645 57.517 30.6771 57.3158 30.8745C57.1222 31.0643 56.94 31.2352 56.7616 31.3794C56.5831 31.5237 56.4389 31.611 56.325 31.6414C56.2035 31.6717 56.1048 31.6793 56.0365 31.6641C55.9682 31.6489 55.915 31.6148 55.8732 31.5616C55.8429 31.5085 55.8277 31.444 55.8277 31.368C55.8277 31.2921 55.8353 31.2124 55.8505 31.1289C55.8657 31.0074 55.8922 30.8859 55.9302 30.7606C55.9682 30.6316 56.0061 30.5253 56.0441 30.438C56.1731 30.1419 56.3516 29.8078 56.5755 29.4396C56.8071 29.0713 57.0615 28.7297 57.3386 28.407C57.6157 28.0843 57.9042 27.8224 58.2041 27.6174C58.504 27.4048 58.7963 27.2985 59.081 27.3061C59.1721 27.3137 59.2481 27.3403 59.3012 27.3858C59.3544 27.4314 59.3923 27.4921 59.4151 27.568C59.4379 27.6364 59.4493 27.7123 59.4493 27.7958C59.4493 27.8793 59.4455 27.959 59.4379 28.035C59.4303 28.0653 59.4265 28.0957 59.4265 28.1261C59.4341 28.1564 59.4341 28.183 59.4265 28.2058C59.4113 28.2513 59.4227 28.2931 59.4607 28.3311C59.3544 28.2703 59.2443 28.2286 59.138 28.2058C59.0393 28.183 58.9482 28.1906 58.8722 28.2286L58.895 28.4108L58.8988 28.4222ZM97.1152 29.637C97.1532 29.9179 97.1342 30.2216 97.0583 30.5443C96.9292 31.0036 96.6749 31.4743 96.2952 31.9526C95.927 32.4348 95.4753 32.8713 94.9476 33.2585C94.4237 33.6495 93.8505 33.9608 93.2279 34.2C92.6053 34.4354 91.9827 34.5455 91.3602 34.5227C91.0223 34.4923 90.6655 34.4088 90.2858 34.2721C89.9176 34.1431 89.5797 33.957 89.2723 33.7217C88.9724 33.4939 88.7294 33.2054 88.5472 32.8637C88.3688 32.5259 88.3118 32.1349 88.3726 31.6831C88.4409 31.1934 88.6231 30.7227 88.9154 30.2747C89.2077 29.8154 89.6709 29.3712 90.3124 28.946L90.2669 28.9574C90.3276 28.9043 90.4453 28.9157 90.6123 28.9916C90.7907 29.0675 90.9654 29.17 91.1438 29.3029C91.3222 29.4244 91.4703 29.5534 91.5917 29.6939C91.7208 29.823 91.774 29.9217 91.7398 29.99L91.4171 30.1722C91.2387 30.2633 91.0641 30.3582 90.8856 30.4569C90.7148 30.5556 90.5554 30.6695 90.3997 30.8024C90.2517 30.9239 90.1264 31.0643 90.0201 31.2276C89.9138 31.3794 89.8417 31.5578 89.8113 31.7552C89.7658 32.0627 89.7885 32.3095 89.8797 32.4993C89.9784 32.6891 90.1226 32.841 90.3048 32.9472C90.4984 33.0535 90.7148 33.1257 90.9616 33.1636C91.2083 33.2016 91.4589 33.2206 91.7094 33.2206C92.1498 33.2206 92.5598 33.156 92.9432 33.027C93.3342 32.9055 93.6872 32.7309 93.9947 32.4993C94.3022 32.2715 94.5566 31.9906 94.7578 31.6641C94.959 31.3339 95.0918 30.9656 95.1602 30.5518C95.1905 30.3469 95.183 30.1419 95.1374 29.9445C95.0994 29.747 95.0349 29.5534 94.94 29.3712C94.8489 29.1814 94.735 28.9954 94.6059 28.8208C94.4806 28.6386 94.3554 28.4563 94.2263 28.2817C94.0744 28.0691 93.9226 27.8527 93.7783 27.6402C93.6303 27.42 93.5088 27.1884 93.4101 26.953C93.319 26.7177 93.2583 26.4709 93.2241 26.2204C93.1937 25.9698 93.2165 25.6965 93.2924 25.408C93.4063 24.9866 93.5999 24.5842 93.8695 24.1932C94.1466 23.8022 94.4731 23.4416 94.8489 23.1037C95.2323 22.7582 95.6575 22.4507 96.1168 22.1736C96.5837 21.9003 97.0659 21.6649 97.5594 21.4751C98.0529 21.2853 98.5426 21.1411 99.0361 21.0499C99.5372 20.9512 100.008 20.9133 100.456 20.9361C100.733 20.9588 100.957 21.0196 101.124 21.1183C101.302 21.2094 101.435 21.3309 101.526 21.4865C101.625 21.6308 101.682 21.8054 101.701 22.0028C101.724 22.2002 101.716 22.4128 101.678 22.633C101.595 23.1151 101.447 23.5365 101.242 23.9047C101.04 24.2653 100.794 24.5956 100.49 24.9031L100.433 24.9486C100.224 25.0777 100.016 25.1423 99.7991 25.1423C99.6207 25.1423 99.4727 25.0967 99.3474 25.0056C99.2259 24.9069 99.1234 24.7968 99.0475 24.6715C98.9716 24.5425 98.9222 24.4172 98.8956 24.2919C98.8729 24.1704 98.8767 24.0831 98.907 24.03C99.0854 23.9464 99.2677 23.8515 99.4613 23.7453C99.6549 23.6314 99.8295 23.5099 99.9927 23.377C100.164 23.2479 100.304 23.1113 100.418 22.9632C100.532 22.8114 100.608 22.6519 100.638 22.4925C100.653 22.409 100.631 22.3331 100.57 22.2647C100.517 22.1964 100.399 22.1508 100.224 22.1281C100.164 22.1129 100.103 22.1053 100.038 22.1053H99.8523C99.5827 22.1053 99.2828 22.1357 98.9526 22.1964C98.6223 22.2495 98.2844 22.3331 97.939 22.4469C97.6011 22.5532 97.2671 22.6861 96.9368 22.8493C96.6141 23.0088 96.3218 23.2024 96.0599 23.4226C95.7979 23.6352 95.5815 23.8781 95.4145 24.1439C95.2513 24.402 95.1602 24.6905 95.1374 25.0018C95.1222 25.2068 95.1374 25.4156 95.1829 25.6206C95.2361 25.818 95.3082 26.0192 95.4031 26.2166C95.4942 26.4064 95.6005 26.6 95.7144 26.7898C95.8359 26.972 95.965 27.1618 96.094 27.3516C96.2497 27.587 96.3977 27.83 96.5458 28.0729C96.6976 28.3083 96.8229 28.5626 96.914 28.8284C97.0127 29.0865 97.081 29.3598 97.1114 29.6408L97.1152 29.637ZM102.745 30.772C102.946 30.4493 103.113 30.1229 103.254 29.785C103.402 29.4396 103.5 29.1055 103.554 28.7752C103.569 28.6917 103.576 28.6196 103.576 28.5588C103.584 28.4981 103.595 28.4374 103.611 28.3766C103.611 28.1868 103.595 28.0122 103.565 27.8603C103.535 27.7085 103.481 27.5794 103.402 27.4693C103.387 27.1732 103.307 26.9037 103.159 26.6683C103.018 26.433 102.798 26.2811 102.491 26.2204C102.168 26.1976 101.838 26.2432 101.5 26.357C101.17 26.4633 100.843 26.6228 100.52 26.8392C100.198 27.0442 99.8864 27.2947 99.5865 27.5832C99.2942 27.8717 99.0323 28.183 98.8007 28.5133C98.5692 28.8436 98.3755 29.1814 98.2123 29.5345C98.0529 29.8799 97.9428 30.214 97.8896 30.5443C97.8745 30.6505 97.8631 30.753 97.8555 30.8555C97.8479 30.9466 97.8441 31.034 97.8441 31.1175C97.8593 31.7894 98.0301 32.2867 98.3528 32.6056C98.6755 32.9283 99.0854 33.0915 99.5865 33.0991C99.8561 33.0991 100.133 33.0384 100.418 32.9169C100.71 32.7954 100.995 32.6322 101.272 32.4234C101.549 32.2108 101.815 31.9602 102.069 31.6793C102.324 31.3908 102.551 31.0871 102.749 30.772H102.745ZM101.143 31.2428C100.949 31.4174 100.756 31.5616 100.555 31.6679C100.353 31.7666 100.164 31.8122 99.9776 31.8046C99.7232 31.7894 99.56 31.6869 99.4802 31.4933C99.4043 31.2959 99.3929 31.0491 99.4461 30.7606C99.4764 30.548 99.5372 30.3165 99.6321 30.0735C99.7308 29.823 99.8523 29.5686 99.9889 29.3181C100.133 29.0675 100.296 28.8246 100.475 28.5968C100.653 28.3614 100.843 28.1451 101.052 27.9552C101.253 27.7806 101.462 27.6326 101.686 27.5187C101.91 27.3972 102.103 27.3289 102.274 27.3137C102.358 27.3137 102.411 27.3213 102.434 27.3365C102.388 27.3592 102.324 27.3972 102.236 27.4503C102.16 27.5035 102.081 27.568 101.993 27.644C101.91 27.7123 101.826 27.7958 101.75 27.8945C101.682 27.9856 101.636 28.0805 101.614 28.1792C101.599 28.2627 101.58 28.3614 101.557 28.4753C101.542 28.5892 101.534 28.6993 101.534 28.8094C101.534 28.9081 101.542 28.9992 101.557 29.0827C101.58 29.1662 101.621 29.2194 101.682 29.2422L102.016 29.0485C102.039 28.9878 102.077 28.9195 102.13 28.8436C102.191 28.7676 102.259 28.6955 102.327 28.6272C102.403 28.5588 102.483 28.5019 102.559 28.4563C102.642 28.4032 102.715 28.3766 102.779 28.3766L102.756 28.4336C102.726 28.6462 102.661 28.8815 102.559 29.1321C102.46 29.3826 102.335 29.6408 102.191 29.8989C102.043 30.1494 101.879 30.3962 101.693 30.6316C101.515 30.8593 101.333 31.0643 101.139 31.239L101.143 31.2428ZM109.886 28.0805C109.924 27.8679 109.939 27.6629 109.931 27.4731C109.924 27.2757 109.882 27.0935 109.806 26.9341C109.73 26.7746 109.612 26.6418 109.46 26.5317C109.316 26.4254 109.123 26.3532 108.883 26.3153C108.538 26.2697 108.158 26.3381 107.741 26.5203C107.327 26.6949 106.917 26.9303 106.518 27.2188C106.488 27.0821 106.424 26.953 106.321 26.8278C106.23 26.7063 106.12 26.6038 105.998 26.5165C105.873 26.4254 105.752 26.3646 105.63 26.3343C105.509 26.2963 105.399 26.3001 105.307 26.3457C105.186 26.6418 105.034 26.9644 104.856 27.3099C104.685 27.6553 104.514 28.0084 104.336 28.3766C104.043 28.9119 103.751 29.4396 103.459 29.9596C103.166 30.4797 102.897 31.0036 102.65 31.5313C102.403 32.0589 102.195 32.5942 102.028 33.1371C101.857 33.6875 101.758 34.2531 101.728 34.834C101.728 34.9403 101.785 35.0428 101.902 35.1453C102.016 35.244 102.149 35.3237 102.293 35.3844C102.43 35.4527 102.567 35.4869 102.696 35.4869C102.825 35.4869 102.904 35.4414 102.927 35.3502C103.003 35.0617 103.075 34.7808 103.136 34.5151C103.197 34.2493 103.261 33.9874 103.333 33.7369C103.402 33.4863 103.478 33.2396 103.554 33.0042C103.63 32.7688 103.724 32.5297 103.831 32.2943C103.914 32.5145 104.062 32.7043 104.267 32.8561C104.476 33.0004 104.757 33.0763 105.11 33.0839C105.531 33.0384 105.964 32.8979 106.401 32.6587C106.841 32.4158 107.255 32.1083 107.646 31.7401C108.044 31.3718 108.413 30.9656 108.743 30.5139C109.081 30.0545 109.358 29.5876 109.574 29.1169C109.722 28.7866 109.825 28.445 109.886 28.0843V28.0805ZM108.454 27.8983C108.417 28.0957 108.333 28.3311 108.2 28.5968C108.067 28.8625 107.904 29.1397 107.703 29.4206C107.509 29.6939 107.297 29.971 107.057 30.2444C106.818 30.5177 106.579 30.7644 106.344 30.977C106.105 31.182 105.873 31.349 105.653 31.4705C105.429 31.592 105.235 31.6452 105.064 31.63C104.886 31.6148 104.78 31.5427 104.742 31.4136C104.704 31.2769 104.696 31.1251 104.719 30.9542C104.734 30.9011 104.746 30.8479 104.753 30.7948C104.768 30.7417 104.784 30.6923 104.799 30.6468C104.799 30.6392 104.806 30.6278 104.822 30.6126H104.833C104.981 30.3317 105.137 30.0356 105.307 29.7319C105.486 29.4168 105.649 29.1245 105.805 28.8511C105.991 28.6613 106.188 28.4791 106.405 28.3121C106.621 28.1451 106.837 28.0008 107.05 27.8869C107.266 27.7654 107.471 27.6743 107.672 27.6136C107.881 27.5528 108.067 27.5263 108.238 27.5339C108.424 27.5415 108.496 27.6629 108.458 27.9021L108.454 27.8983ZM120.34 23.3694C120.454 23.5213 120.549 23.6807 120.618 23.8402C120.693 23.992 120.724 24.1021 120.709 24.1742C120.625 24.3944 120.526 24.5918 120.42 24.7588C120.321 24.9259 120.215 25.1005 120.109 25.2751C120.003 25.4497 119.889 25.632 119.775 25.8142C119.668 25.9964 119.558 26.2128 119.452 26.4557C119.361 26.433 119.258 26.3798 119.152 26.2963C119.053 26.2052 118.959 26.1027 118.875 25.985C118.792 25.8711 118.719 25.7534 118.666 25.6282C118.621 25.5067 118.606 25.4042 118.621 25.3169C118.659 25.165 118.708 24.9942 118.773 24.812C118.841 24.6298 118.921 24.4362 119.004 24.2388C119.088 24.0414 119.167 23.8364 119.247 23.6314C119.327 23.4264 119.384 23.2252 119.433 23.0354L119.665 22.7962C119.756 22.781 119.866 22.8342 119.987 22.9556C120.116 23.0695 120.238 23.2062 120.344 23.3694H120.34ZM126.543 29.3409C126.498 29.2649 126.437 29.2004 126.357 29.1472C126.281 29.0941 126.198 29.0599 126.114 29.0448C126.031 29.022 125.97 29.0296 125.94 29.0675C125.909 29.1207 125.879 29.17 125.849 29.2156C125.818 29.2611 125.773 29.3143 125.712 29.375C125.541 29.6104 125.363 29.8609 125.169 30.1191C124.983 30.3696 124.79 30.6126 124.581 30.8404C124.38 31.0605 124.175 31.2617 123.958 31.4364C123.742 31.611 123.522 31.7401 123.29 31.816H123.21C123.21 31.816 123.226 31.8008 123.233 31.7932C123.248 31.7856 123.256 31.7742 123.256 31.759C123.271 31.6603 123.305 31.5427 123.358 31.4022C123.419 31.2579 123.487 31.1061 123.567 30.9429C123.643 30.7834 123.723 30.6164 123.81 30.4493C123.901 30.2823 123.992 30.1229 124.076 29.9786C124.114 29.9103 124.152 29.8457 124.19 29.785C124.228 29.7167 124.262 29.6559 124.292 29.6028C124.338 29.4965 124.349 29.3864 124.326 29.2687C124.311 29.1548 124.273 29.0448 124.213 28.9347C124.152 28.8208 124.076 28.7183 123.981 28.6234C123.89 28.5323 123.787 28.4525 123.681 28.3842C123.734 28.407 123.795 28.4184 123.867 28.4184C123.943 28.4184 124.019 28.4146 124.087 28.407C124.156 28.3918 124.213 28.3728 124.262 28.35C124.315 28.3197 124.345 28.2817 124.353 28.2362C124.399 28.0388 124.425 27.8376 124.433 27.6402C124.448 27.4352 124.436 27.2416 124.399 27.0669C124.368 26.8847 124.304 26.7253 124.201 26.5962C124.11 26.4595 123.97 26.3608 123.787 26.3001C123.681 26.2697 123.579 26.2469 123.487 26.2318C123.396 26.2166 123.298 26.209 123.199 26.209C122.861 26.209 122.519 26.2811 122.174 26.4254C121.836 26.5696 121.502 26.767 121.172 27.01C120.841 27.2529 120.526 27.5339 120.227 27.8451C119.934 28.1602 119.665 28.4829 119.418 28.8208C119.221 29.0865 119.053 29.356 118.902 29.6218C118.757 29.7926 118.613 29.9672 118.461 30.1494C118.252 30.3924 118.04 30.6278 117.816 30.8479C117.6 31.0681 117.376 31.2693 117.136 31.444C116.897 31.611 116.654 31.7325 116.408 31.8122H116.328C116.282 31.8122 116.282 31.759 116.328 31.6527C116.373 31.5389 116.445 31.3908 116.548 31.2048C116.654 31.0226 116.783 30.81 116.928 30.5746C117.079 30.3393 117.239 30.0963 117.402 29.8533C117.573 29.6028 117.736 29.356 117.899 29.1207C118.07 28.8777 118.222 28.6537 118.363 28.4563C118.416 28.3728 118.476 28.2817 118.549 28.183C118.617 28.0843 118.681 27.997 118.735 27.9211C118.788 27.8452 118.83 27.7844 118.86 27.7389C118.89 27.6933 118.898 27.6781 118.883 27.6933C118.981 27.5187 119.008 27.3365 118.962 27.1542C118.917 26.9644 118.837 26.7974 118.719 26.6607C118.606 26.5165 118.469 26.4102 118.317 26.3381C118.161 26.2621 118.029 26.2507 117.915 26.3039L117.763 26.4406C117.63 26.7063 117.47 27.0062 117.277 27.3327C117.091 27.6553 116.901 27.9856 116.7 28.3311C116.468 28.7145 116.244 29.0941 116.02 29.4775C115.952 29.5648 115.887 29.6559 115.815 29.7433C115.732 29.8571 115.637 29.9748 115.538 30.1001C115.17 30.5746 114.813 30.9466 114.475 31.2238C114.137 31.4971 113.853 31.6945 113.621 31.8084H113.632C113.587 31.8388 113.56 31.8615 113.553 31.8767C113.606 31.6641 113.663 31.4629 113.727 31.2807C113.796 31.0985 113.868 30.9163 113.948 30.7417C114.031 30.567 114.126 30.3886 114.225 30.214C114.331 30.0318 114.449 29.8306 114.57 29.618C114.711 29.375 114.874 29.0827 115.067 28.7486C115.261 28.4032 115.455 28.0388 115.656 27.6477C115.709 27.5263 115.724 27.3858 115.701 27.2226C115.679 27.0631 115.629 26.9113 115.55 26.7746C115.474 26.638 115.379 26.5241 115.272 26.4292C115.174 26.3305 115.067 26.2811 114.961 26.2811C114.699 26.3039 114.434 26.376 114.164 26.4975C113.902 26.619 113.64 26.7708 113.378 26.9568L113.576 26.6607C113.746 26.4026 113.917 26.1293 114.096 25.8483C114.282 25.5598 114.452 25.2827 114.616 25.0246C114.775 24.7588 114.919 24.5159 115.041 24.3033C115.17 24.0907 115.265 23.9237 115.318 23.8098C115.386 23.6428 115.386 23.4681 115.318 23.2935C115.25 23.1113 115.143 22.948 115.007 22.8114C114.874 22.6747 114.726 22.576 114.559 22.5153C114.396 22.4469 114.255 22.4432 114.134 22.5039C114.042 22.7317 113.925 22.986 113.788 23.2593C113.659 23.5251 113.511 23.806 113.352 24.0945C113.196 24.383 113.033 24.6829 112.854 24.9866C112.683 25.2865 112.513 25.5788 112.334 25.8673L111.871 26.6C111.586 27.0669 111.302 27.5377 111.017 28.0084C110.732 28.4829 110.466 28.9574 110.22 29.4282C109.973 29.9027 109.757 30.3772 109.563 30.8479C109.377 31.3225 109.236 31.7932 109.138 32.2563C109.13 32.355 109.183 32.4537 109.297 32.5524C109.404 32.6511 109.529 32.7347 109.665 32.803C109.814 32.8637 109.95 32.8979 110.079 32.9055C110.208 32.9131 110.292 32.8751 110.322 32.7916C110.459 32.2639 110.645 31.7476 110.876 31.2428C111.108 30.7303 111.362 30.2216 111.639 29.7167C111.909 29.4282 112.171 29.1548 112.425 28.9043C112.687 28.6537 112.968 28.4032 113.268 28.1602L113.822 27.6895C113.807 27.773 113.769 27.8831 113.708 28.0236C113.655 28.1526 113.583 28.2931 113.488 28.4487C113.287 28.8094 113.112 29.1321 112.957 29.4244C112.801 29.7053 112.664 29.971 112.543 30.214C112.429 30.4569 112.327 30.6923 112.243 30.9125C112.167 31.1327 112.103 31.3604 112.046 31.5882C111.993 31.8539 111.981 32.0893 112.012 32.2867C112.049 32.4765 112.114 32.636 112.209 32.7574C112.304 32.8789 112.422 32.9662 112.566 33.0194C112.714 33.0801 112.866 33.1105 113.029 33.1105C113.291 33.1105 113.568 33.0194 113.86 32.8372C114.16 32.6473 114.452 32.4158 114.737 32.15C114.794 32.0969 114.847 32.04 114.9 31.9868C114.859 32.2981 114.885 32.5638 114.988 32.7802C115.086 33.0004 115.288 33.1181 115.588 33.1257C115.724 33.1257 115.868 33.1029 116.013 33.0573C116.161 33.0194 116.297 32.97 116.427 32.9093C116.556 32.8485 116.677 32.784 116.783 32.7157C116.897 32.6398 116.996 32.5752 117.072 32.5221C117.478 32.1956 117.88 31.8236 118.283 31.4098C118.275 31.5237 118.275 31.6414 118.279 31.7666C118.294 31.9716 118.344 32.169 118.431 32.3512C118.514 32.5335 118.643 32.6967 118.811 32.8334C118.989 32.9624 119.221 33.0422 119.513 33.0725C119.835 33.0649 120.173 32.9472 120.526 32.7157C120.879 32.4803 121.229 32.1994 121.578 31.8805C121.54 32.226 121.593 32.5107 121.741 32.7385C121.897 32.9662 122.155 33.0991 122.527 33.1295C122.679 33.1371 122.831 33.1181 122.975 33.0725C123.119 33.0346 123.256 32.9814 123.377 32.9131C123.506 32.8523 123.624 32.7878 123.723 32.7195C123.829 32.6436 123.92 32.5752 123.989 32.5145C124.425 32.1614 124.824 31.7704 125.177 31.3339C125.537 30.8897 125.883 30.4456 126.213 29.9938V29.9824L126.547 29.5231C126.593 29.4699 126.593 29.4092 126.547 29.3409H126.543ZM123.024 28.4222C122.986 28.574 122.918 28.7638 122.816 28.984C122.724 29.1966 122.618 29.4206 122.504 29.6483C122.375 29.823 122.212 30.0242 122.018 30.2444C121.832 30.4645 121.642 30.6771 121.441 30.8745C121.248 31.0643 121.065 31.2352 120.887 31.3794C120.709 31.5237 120.564 31.611 120.45 31.6414C120.325 31.6717 120.23 31.6793 120.162 31.6641C120.094 31.6489 120.04 31.6148 119.999 31.5616C119.968 31.5085 119.953 31.444 119.953 31.368C119.953 31.2921 119.961 31.2124 119.976 31.1289C119.991 31.0074 120.018 30.8859 120.056 30.7606C120.094 30.6316 120.132 30.5253 120.17 30.438C120.299 30.1419 120.477 29.8078 120.701 29.4396C120.933 29.0713 121.187 28.7297 121.464 28.407C121.741 28.0843 122.03 27.8224 122.33 27.6174C122.629 27.4048 122.922 27.2985 123.207 27.3061C123.298 27.3137 123.37 27.3403 123.427 27.3858C123.48 27.4314 123.518 27.4921 123.541 27.568C123.563 27.6364 123.575 27.7123 123.575 27.7958C123.575 27.8793 123.571 27.959 123.563 28.035C123.556 28.0653 123.552 28.0957 123.552 28.1261C123.56 28.1564 123.56 28.183 123.552 28.2058C123.537 28.2513 123.548 28.2931 123.586 28.3311C123.48 28.2703 123.37 28.2286 123.263 28.2058C123.165 28.183 123.074 28.1906 122.998 28.2286L123.021 28.4108L123.024 28.4222ZM85.9923 27.9059C85.8822 27.8717 85.7646 27.8489 85.6355 27.8489C84.956 27.8489 84.0525 28.407 83.3654 29.4661C82.6023 28.3311 81.7406 26.7632 82.0405 25.7724C82.162 25.3738 82.553 24.831 83.2629 24.831C84.0449 24.831 83.9841 25.4573 83.8816 25.7648C83.6387 26.6 83.1528 26.991 83.0655 27.3441C83.483 27.3441 84.7206 27.1656 85.161 25.8218C85.4267 25.0701 85.3811 23.8515 83.7184 23.8515C82.5682 23.8515 81.0535 24.5614 80.6283 25.9736C80.4765 26.5051 80.484 27.1163 80.6321 27.754C79.3869 28.2817 78.3961 29.3788 78.0241 30.6088C77.5078 32.3057 78.6049 33.2851 80.0057 33.2851C81.0838 33.2851 82.0671 32.6967 82.8681 31.8577C83.3616 32.412 83.8816 32.9548 84.4511 33.437L85.5634 32.0589C85.1116 31.7325 84.4852 30.9163 84.0525 30.4076C84.2081 29.6559 84.9294 29.4054 85.5368 29.4054C85.7494 29.4054 85.9468 29.4434 86.1062 29.4889C86.5048 28.8436 86.6415 28.1337 85.9961 27.9097L85.9923 27.9059ZM80.6814 31.797C79.888 31.797 79.3907 31.3149 79.6223 30.548C79.8045 29.9331 80.4157 29.3333 81.0383 28.9802C81.3648 29.747 81.8241 30.4987 82.3328 31.182C81.8848 31.5844 81.285 31.797 80.6814 31.797Z" fill="#00313C" fill-opacity="0.5"></path>
+</svg>
+                    </div>
+                    <div class="differencesChartTopOthers">Others</div>
+                </div>
+                <div class="differencesChartList">
+                    
+                    
+                        <div class="differencesChartListItem">
+                            <div class="differencesChartListItemText">
+                                <p>See it before we print it</p>
+                            </div>
+                            <div class="differencesChartListItemIcon">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewbox="0 0 20 20" fill="none">
+                                    <path d="M20 10.0042C20 15.527 15.5228 20.0042 10 20.0042C4.47715 20.0042 0 15.527 0 10.0042C0 4.4813 4.47715 0.00415039 10 0.00415039C15.5228 0.00415039 20 4.4813 20 10.0042ZM15.0379 6.21624C14.6718 5.85012 14.0782 5.85012 13.7121 6.21624C13.7032 6.22508 13.6949 6.23444 13.6872 6.24428L9.34674 11.7751L6.72985 9.15818C6.36373 8.79206 5.77014 8.79206 5.40402 9.15818C5.0379 9.5243 5.0379 10.1179 5.40402 10.484L8.71208 13.7921C9.0782 14.1582 9.67179 14.1582 10.0379 13.7921C10.0461 13.7839 10.0538 13.7753 10.061 13.7663L15.0512 7.52849C15.404 7.16142 15.3995 6.57786 15.0379 6.21624Z" fill="#2677CB"></path>
+                                </svg>
+                            </div>
+                            <div class="differencesChartListItemIcon">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewbox="0 0 20 20" fill="none">
+                                    <path d="M10 18.7542C5.16751 18.7542 1.25 14.8366 1.25 10.0042C1.25 5.17166 5.16751 1.25415 10 1.25415C14.8325 1.25415 18.75 5.17166 18.75 10.0042C18.75 14.8366 14.8325 18.7542 10 18.7542ZM10 20.0042C15.5228 20.0042 20 15.527 20 10.0042C20 4.4813 15.5228 0.00415039 10 0.00415039C4.47715 0.00415039 0 4.4813 0 10.0042C0 15.527 4.47715 20.0042 10 20.0042Z" fill="#868684"></path>
+                                    <path d="M5.80806 5.81221C6.05214 5.56813 6.44786 5.56813 6.69194 5.81221L10 9.12027L13.3081 5.81221C13.5521 5.56813 13.9479 5.56813 14.1919 5.81221C14.436 6.05629 14.436 6.45201 14.1919 6.69609L10.8839 10.0042L14.1919 13.3122C14.436 13.5563 14.436 13.952 14.1919 14.1961C13.9479 14.4402 13.5521 14.4402 13.3081 14.1961L10 10.888L6.69194 14.1961C6.44786 14.4402 6.05214 14.4402 5.80806 14.1961C5.56398 13.952 5.56398 13.5563 5.80806 13.3122L9.11612 10.0042L5.80806 6.69609C5.56398 6.45201 5.56398 6.05629 5.80806 5.81221Z" fill="#868684"></path>
+                                </svg>
+                            </div>
+                        </div>
+                    
+                        <div class="differencesChartListItem">
+                            <div class="differencesChartListItemText">
+                                <p>
+Approve your portrait</p>
+                            </div>
+                            <div class="differencesChartListItemIcon">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewbox="0 0 20 20" fill="none">
+                                    <path d="M20 10.0042C20 15.527 15.5228 20.0042 10 20.0042C4.47715 20.0042 0 15.527 0 10.0042C0 4.4813 4.47715 0.00415039 10 0.00415039C15.5228 0.00415039 20 4.4813 20 10.0042ZM15.0379 6.21624C14.6718 5.85012 14.0782 5.85012 13.7121 6.21624C13.7032 6.22508 13.6949 6.23444 13.6872 6.24428L9.34674 11.7751L6.72985 9.15818C6.36373 8.79206 5.77014 8.79206 5.40402 9.15818C5.0379 9.5243 5.0379 10.1179 5.40402 10.484L8.71208 13.7921C9.0782 14.1582 9.67179 14.1582 10.0379 13.7921C10.0461 13.7839 10.0538 13.7753 10.061 13.7663L15.0512 7.52849C15.404 7.16142 15.3995 6.57786 15.0379 6.21624Z" fill="#2677CB"></path>
+                                </svg>
+                            </div>
+                            <div class="differencesChartListItemIcon">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewbox="0 0 20 20" fill="none">
+                                    <path d="M10 18.7542C5.16751 18.7542 1.25 14.8366 1.25 10.0042C1.25 5.17166 5.16751 1.25415 10 1.25415C14.8325 1.25415 18.75 5.17166 18.75 10.0042C18.75 14.8366 14.8325 18.7542 10 18.7542ZM10 20.0042C15.5228 20.0042 20 15.527 20 10.0042C20 4.4813 15.5228 0.00415039 10 0.00415039C4.47715 0.00415039 0 4.4813 0 10.0042C0 15.527 4.47715 20.0042 10 20.0042Z" fill="#868684"></path>
+                                    <path d="M5.80806 5.81221C6.05214 5.56813 6.44786 5.56813 6.69194 5.81221L10 9.12027L13.3081 5.81221C13.5521 5.56813 13.9479 5.56813 14.1919 5.81221C14.436 6.05629 14.436 6.45201 14.1919 6.69609L10.8839 10.0042L14.1919 13.3122C14.436 13.5563 14.436 13.952 14.1919 14.1961C13.9479 14.4402 13.5521 14.4402 13.3081 14.1961L10 10.888L6.69194 14.1961C6.44786 14.4402 6.05214 14.4402 5.80806 14.1961C5.56398 13.952 5.56398 13.5563 5.80806 13.3122L9.11612 10.0042L5.80806 6.69609C5.56398 6.45201 5.56398 6.05629 5.80806 5.81221Z" fill="#868684"></path>
+                                </svg>
+                            </div>
+                        </div>
+                    
+                        <div class="differencesChartListItem">
+                            <div class="differencesChartListItemText">
+                                <p>
+Free unlimited edits</p>
+                            </div>
+                            <div class="differencesChartListItemIcon">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewbox="0 0 20 20" fill="none">
+                                    <path d="M20 10.0042C20 15.527 15.5228 20.0042 10 20.0042C4.47715 20.0042 0 15.527 0 10.0042C0 4.4813 4.47715 0.00415039 10 0.00415039C15.5228 0.00415039 20 4.4813 20 10.0042ZM15.0379 6.21624C14.6718 5.85012 14.0782 5.85012 13.7121 6.21624C13.7032 6.22508 13.6949 6.23444 13.6872 6.24428L9.34674 11.7751L6.72985 9.15818C6.36373 8.79206 5.77014 8.79206 5.40402 9.15818C5.0379 9.5243 5.0379 10.1179 5.40402 10.484L8.71208 13.7921C9.0782 14.1582 9.67179 14.1582 10.0379 13.7921C10.0461 13.7839 10.0538 13.7753 10.061 13.7663L15.0512 7.52849C15.404 7.16142 15.3995 6.57786 15.0379 6.21624Z" fill="#2677CB"></path>
+                                </svg>
+                            </div>
+                            <div class="differencesChartListItemIcon">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewbox="0 0 20 20" fill="none">
+                                    <path d="M10 18.7542C5.16751 18.7542 1.25 14.8366 1.25 10.0042C1.25 5.17166 5.16751 1.25415 10 1.25415C14.8325 1.25415 18.75 5.17166 18.75 10.0042C18.75 14.8366 14.8325 18.7542 10 18.7542ZM10 20.0042C15.5228 20.0042 20 15.527 20 10.0042C20 4.4813 15.5228 0.00415039 10 0.00415039C4.47715 0.00415039 0 4.4813 0 10.0042C0 15.527 4.47715 20.0042 10 20.0042Z" fill="#868684"></path>
+                                    <path d="M5.80806 5.81221C6.05214 5.56813 6.44786 5.56813 6.69194 5.81221L10 9.12027L13.3081 5.81221C13.5521 5.56813 13.9479 5.56813 14.1919 5.81221C14.436 6.05629 14.436 6.45201 14.1919 6.69609L10.8839 10.0042L14.1919 13.3122C14.436 13.5563 14.436 13.952 14.1919 14.1961C13.9479 14.4402 13.5521 14.4402 13.3081 14.1961L10 10.888L6.69194 14.1961C6.44786 14.4402 6.05214 14.4402 5.80806 14.1961C5.56398 13.952 5.56398 13.5563 5.80806 13.3122L9.11612 10.0042L5.80806 6.69609C5.56398 6.45201 5.56398 6.05629 5.80806 5.81221Z" fill="#868684"></path>
+                                </svg>
+                            </div>
+                        </div>
+                    
+                        <div class="differencesChartListItem">
+                            <div class="differencesChartListItemText">
+                                <p>
+Speak to the artists</p>
+                            </div>
+                            <div class="differencesChartListItemIcon">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewbox="0 0 20 20" fill="none">
+                                    <path d="M20 10.0042C20 15.527 15.5228 20.0042 10 20.0042C4.47715 20.0042 0 15.527 0 10.0042C0 4.4813 4.47715 0.00415039 10 0.00415039C15.5228 0.00415039 20 4.4813 20 10.0042ZM15.0379 6.21624C14.6718 5.85012 14.0782 5.85012 13.7121 6.21624C13.7032 6.22508 13.6949 6.23444 13.6872 6.24428L9.34674 11.7751L6.72985 9.15818C6.36373 8.79206 5.77014 8.79206 5.40402 9.15818C5.0379 9.5243 5.0379 10.1179 5.40402 10.484L8.71208 13.7921C9.0782 14.1582 9.67179 14.1582 10.0379 13.7921C10.0461 13.7839 10.0538 13.7753 10.061 13.7663L15.0512 7.52849C15.404 7.16142 15.3995 6.57786 15.0379 6.21624Z" fill="#2677CB"></path>
+                                </svg>
+                            </div>
+                            <div class="differencesChartListItemIcon">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewbox="0 0 20 20" fill="none">
+                                    <path d="M10 18.7542C5.16751 18.7542 1.25 14.8366 1.25 10.0042C1.25 5.17166 5.16751 1.25415 10 1.25415C14.8325 1.25415 18.75 5.17166 18.75 10.0042C18.75 14.8366 14.8325 18.7542 10 18.7542ZM10 20.0042C15.5228 20.0042 20 15.527 20 10.0042C20 4.4813 15.5228 0.00415039 10 0.00415039C4.47715 0.00415039 0 4.4813 0 10.0042C0 15.527 4.47715 20.0042 10 20.0042Z" fill="#868684"></path>
+                                    <path d="M5.80806 5.81221C6.05214 5.56813 6.44786 5.56813 6.69194 5.81221L10 9.12027L13.3081 5.81221C13.5521 5.56813 13.9479 5.56813 14.1919 5.81221C14.436 6.05629 14.436 6.45201 14.1919 6.69609L10.8839 10.0042L14.1919 13.3122C14.436 13.5563 14.436 13.952 14.1919 14.1961C13.9479 14.4402 13.5521 14.4402 13.3081 14.1961L10 10.888L6.69194 14.1961C6.44786 14.4402 6.05214 14.4402 5.80806 14.1961C5.56398 13.952 5.56398 13.5563 5.80806 13.3122L9.11612 10.0042L5.80806 6.69609C5.56398 6.45201 5.56398 6.05629 5.80806 5.81221Z" fill="#868684"></path>
+                                </svg>
+                            </div>
+                        </div>
+                    
+                        <div class="differencesChartListItem">
+                            <div class="differencesChartListItemText">
+                                <p>
+11,000+ 5 star reviews</p>
+                            </div>
+                            <div class="differencesChartListItemIcon">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewbox="0 0 20 20" fill="none">
+                                    <path d="M20 10.0042C20 15.527 15.5228 20.0042 10 20.0042C4.47715 20.0042 0 15.527 0 10.0042C0 4.4813 4.47715 0.00415039 10 0.00415039C15.5228 0.00415039 20 4.4813 20 10.0042ZM15.0379 6.21624C14.6718 5.85012 14.0782 5.85012 13.7121 6.21624C13.7032 6.22508 13.6949 6.23444 13.6872 6.24428L9.34674 11.7751L6.72985 9.15818C6.36373 8.79206 5.77014 8.79206 5.40402 9.15818C5.0379 9.5243 5.0379 10.1179 5.40402 10.484L8.71208 13.7921C9.0782 14.1582 9.67179 14.1582 10.0379 13.7921C10.0461 13.7839 10.0538 13.7753 10.061 13.7663L15.0512 7.52849C15.404 7.16142 15.3995 6.57786 15.0379 6.21624Z" fill="#2677CB"></path>
+                                </svg>
+                            </div>
+                            <div class="differencesChartListItemIcon">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewbox="0 0 20 20" fill="none">
+                                    <path d="M10 18.7542C5.16751 18.7542 1.25 14.8366 1.25 10.0042C1.25 5.17166 5.16751 1.25415 10 1.25415C14.8325 1.25415 18.75 5.17166 18.75 10.0042C18.75 14.8366 14.8325 18.7542 10 18.7542ZM10 20.0042C15.5228 20.0042 20 15.527 20 10.0042C20 4.4813 15.5228 0.00415039 10 0.00415039C4.47715 0.00415039 0 4.4813 0 10.0042C0 15.527 4.47715 20.0042 10 20.0042Z" fill="#868684"></path>
+                                    <path d="M5.80806 5.81221C6.05214 5.56813 6.44786 5.56813 6.69194 5.81221L10 9.12027L13.3081 5.81221C13.5521 5.56813 13.9479 5.56813 14.1919 5.81221C14.436 6.05629 14.436 6.45201 14.1919 6.69609L10.8839 10.0042L14.1919 13.3122C14.436 13.5563 14.436 13.952 14.1919 14.1961C13.9479 14.4402 13.5521 14.4402 13.3081 14.1961L10 10.888L6.69194 14.1961C6.44786 14.4402 6.05214 14.4402 5.80806 14.1961C5.56398 13.952 5.56398 13.5563 5.80806 13.3122L9.11612 10.0042L5.80806 6.69609C5.56398 6.45201 5.56398 6.05629 5.80806 5.81221Z" fill="#868684"></path>
+                                </svg>
+                            </div>
+                        </div>
+                    
+                </div>
+            </div>
+        
+    </div>
+</section>
+
+</div><div id="shopify-section-template--18265728680154__section_why_gPUTrP" class="shopify-section"><style>
+
+    [id="template--18265728680154__section_why_gPUTrP"] {
+        padding: 80px 30px 208px;
+        border-bottom: 2px solid #F1F6FB;
+        background-color: #fff;
+    }
+
+    [id="template--18265728680154__section_why_gPUTrP"].noBackground {
+        background-color: transparent;
+    }
+
+    [id="template--18265728680154__section_why_gPUTrP"].noBorder {
+        border-bottom: none;
+    }
+
+    .why {
+        position: relative;
+    }
+
+    .whyTitle {
+        text-align: center;
+        font-family: Faktum;
+        font-size: 48px;
+        font-weight: 600;
+        line-height: 100%;
+        margin-bottom: 112px;
+    }
+
+    .whyBlock {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 64px 40px;
+    }
+
+    .whyItem {
+        max-width: 296px;
+    }
+
+    .whyItem:nth-child(even) {
+        justify-self: flex-end;
+    }
+
+    .whyItemTop {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 20px;
+    }
+
+    .whyItemTopImage {
+        width: 32px;
+    }
+
+    .whyItemTopTitle {
+        font-family: Faktum;
+        font-size: 24px;
+        font-weight: 600;
+        line-height: 130%;
+    }
+
+    .whyItemText {
+        color: var(--secondary);
+    }
+
+    .whySwiper {
+        display: none;
+    }
+
+    .whySwiper .swiper-slide {
+        max-width: fit-content;
+        height: auto;
+    }
+
+    [id="template--18265728680154__section_why_gPUTrP"] .whyImage {
+        position: absolute;
+        bottom: 50%;
+        left: 50%;
+        translate: -50% calc(50% + 10%);
+        max-width: 878px;
+        z-index: -1;
+        pointer-events: none;
+    }
+
+    .whyImage * {
+        object-fit: cover;
+    }
+
+    @media (max-width: 1050px) {
+
+        .whyBlock {
+            display: none;
+        }
+
+        .whyTitle {
+            margin-bottom: 0;
+        }
+
+        .whySwiper {
+            display: block;
+            padding: 112px 0 3px;
+        }
+
+        [id="template--18265728680154__section_why_gPUTrP"] .whyImage {
+            position: relative;
+            bottom: unset;
+            left: unset;
+            translate: 0 -73px;
+            z-index: 2;
+        }
+
+        .whyItem {
+            background-color: #fff;
+            border-radius: 24px;
+            padding: 40px 32px;
+            max-width: 320px;
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            box-shadow: 0 0 3px var(--brand);
+        }
+
+    }
+
+    @media (max-width: 800px) {
+
+        [id="template--18265728680154__section_why_gPUTrP"] {
+            padding: 48px 0 0px;
+        }
+
+        .whyTitle {
+            font-size: 36px;
+        }
+
+        .whySwiper {
+            display: block;
+            padding: 44px 0 3px;
+        }
+
+        .whyItem:nth-child(even) {
+            justify-self: unset;
+        }
+
+        .whyItemTop {
+            margin-bottom: 24px;
+        }
+
+    }
+
+</style>
+
+<section id="template--18265728680154__section_why_gPUTrP" class="why container noBackground noBorder">
+
+    <div class="whyTitle">Why Choose Us</div>
+
+    <div class="whyBlock">
+        
+            <div class="whyItem">
+                <div class="whyItemTop">
+                    <img class="whyItemTopImage" src="static/picture/IconContainer_3_30a4c2c6-3d44-411f-9818-bfb98d09616e.svg" alt="" loading="lazy">
+                    <div class="whyItemTopTitle">Printed Locally</div>
+                </div>
+                <div class="whyItemText"><p>Our products are fulfilled locally in the USA, Canada, Australia, UK & the EU. This means FREE & FAST shipping.</p></div>
+            </div>
+        
+            <div class="whyItem">
+                <div class="whyItemTop">
+                    <img class="whyItemTopImage" src="static/picture/gar.png" alt="" loading="lazy">
+                    <div class="whyItemTopTitle">Satisfaction Guarantee</div>
+                </div>
+                <div class="whyItemText"><p>We will work with you until you are 100% satisfied with your artwork.</p></div>
+            </div>
+        
+            <div class="whyItem">
+                <div class="whyItemTop">
+                    <img class="whyItemTopImage" src="static/picture/IconContainer_4_b28426e1-57a6-4432-8ff4-966dd2e46a41.svg" alt="" loading="lazy">
+                    <div class="whyItemTopTitle">Unlimited Revisions</div>
+                </div>
+                <div class="whyItemText"><p>We'll email you a preview of your art around 2-3 days after you place your order, and you can request any changes, free of charge! </p></div>
+            </div>
+        
+            <div class="whyItem">
+                <div class="whyItemTop">
+                    <img class="whyItemTopImage" src="static/picture/rev.png" alt="" loading="lazy">
+                    <div class="whyItemTopTitle">11,000+ Five Star Reviews</div>
+                </div>
+                <div class="whyItemText"><p>We’re proud to go above and beyond for each customer, ensuring you’re thrilled with your order and our service. With over 11,000 5-star reviews, your satisfaction is our priority.</p></div>
+            </div>
+        
+    </div>
+
+    <div class="swiper whySwiper">
+        <div class="swiper-wrapper">
+            
+                <div class="swiper-slide">
+                    <div class="whyItem">
+                        <div class="whyItemTop">
+                            <img class="whyItemTopImage" src="static/picture/IconContainer_3_30a4c2c6-3d44-411f-9818-bfb98d09616e.svg" alt="" loading="lazy">
+                            <div class="whyItemTopTitle">Printed Locally</div>
+                        </div>
+                        <div class="whyItemText"><p>Our products are fulfilled locally in the USA, Canada, Australia, UK & the EU. This means FREE & FAST shipping.</p></div>
+                    </div>
+                </div>
+            
+                <div class="swiper-slide">
+                    <div class="whyItem">
+                        <div class="whyItemTop">
+                            <img class="whyItemTopImage" src="static/picture/gar.png" alt="" loading="lazy">
+                            <div class="whyItemTopTitle">Satisfaction Guarantee</div>
+                        </div>
+                        <div class="whyItemText"><p>We will work with you until you are 100% satisfied with your artwork.</p></div>
+                    </div>
+                </div>
+            
+                <div class="swiper-slide">
+                    <div class="whyItem">
+                        <div class="whyItemTop">
+                            <img class="whyItemTopImage" src="static/picture/IconContainer_4_b28426e1-57a6-4432-8ff4-966dd2e46a41.svg" alt="" loading="lazy">
+                            <div class="whyItemTopTitle">Unlimited Revisions</div>
+                        </div>
+                        <div class="whyItemText"><p>We'll email you a preview of your art around 2-3 days after you place your order, and you can request any changes, free of charge! </p></div>
+                    </div>
+                </div>
+            
+                <div class="swiper-slide">
+                    <div class="whyItem">
+                        <div class="whyItemTop">
+                            <img class="whyItemTopImage" src="static/picture/rev.png" alt="" loading="lazy">
+                            <div class="whyItemTopTitle">11,000+ Five Star Reviews</div>
+                        </div>
+                        <div class="whyItemText"><p>We’re proud to go above and beyond for each customer, ensuring you’re thrilled with your order and our service. With over 11,000 5-star reviews, your satisfaction is our priority.</p></div>
+                    </div>
+                </div>
+            
+        </div>
+    </div>
+
+    
+
+    <picture class="whyImage">
+        <source media="(max-width: 550px)" srcset="//petcreationsart.com/cdn/shop/files/Image_1.png?v=1720197450&width=600">
+        <source media="(max-width: 800px)" srcset="//petcreationsart.com/cdn/shop/files/Image_1.png?v=1720197450&width=900">
+        <source media="(max-width: 1400px)" srcset="//petcreationsart.com/cdn/shop/files/Group_1000006882_1.png?v=1720197454&width=1500">
+        <source srcset="//petcreationsart.com/cdn/shop/files/Group_1000006882_1.png?v=1720197454&width=2016">
+        <img src="static/picture/Group_1000006882_1.png" alt="" loading="lazy">
+    </picture>
+
+</section>
+
+<script>
+    (function () {
+        const section = document.querySelector(`[id="template--18265728680154__section_why_gPUTrP"]`);
+        new Swiper(section.querySelector(".swiper"), {
+            slidesPerView: 'auto',
+            centeredSlides: true,
+            spaceBetween: 16,
+            loop: true,
+            breakpoints: {
+                801: {
+                    slidesPerView: 2,
+                    spaceBetween: 30,
+                    centeredSlides: false,
+                }
+            }
+        });
+    }());
+</script>
+
+</div> 
+
+</div>
+
+<div id="shopify-section-template--18265728680154__17211424497c8c43a5" class="shopify-section">
+  
+      
+
+</div>
+<div id="shopify-section-template--18265728680154__section_large_footer_xbKFEP" class="shopify-section">
+    
+
+</div>
+    </main>
+
+    <!-- Footer -->
+    <div id="shopify-section-theme-footer" class="shopify-section"><footer id="footer">
+
+    <div id="footerTop">
+        <div id="footerSocial">
+            <a id="footerSocialLogo" href="index.html" title="homepage">
+                <img src="static/image/logo.svg" style="width: auto; height: 60px; vertical-align: middle;" alt="Pet Creations Art Logo">
+
+            </a>
+            <div id="footerSocialLinks">
+                
+                    <a href="https://www.facebook.com/YOURNAME" target="_blank">
+                        <img src="static/picture/Icon.svg" alt="" class="footerSocialLinksItem">
+                    </a>
+                
+                    <a href="https://twitter.com/YOURNAME" target="_blank">
+                        <img src="static/picture/Icon_1.svg" alt="" class="footerSocialLinksItem">
+                    </a>
+                
+                    <a href="https://www.instagram.com/YOURNAME" target="_blank">
+                        <img src="static/picture/Icon_3.svg" alt="" class="footerSocialLinksItem">
+                    </a>
+                
+            </div>
+        </div>
+        <nav id="footerNav">
+            
+                <div class="footerNavSection">
+                    <h3 class="footerNavSectionTitle">Company</h3>
+                    
+                        <a href="f-a-q.html" class="footerNavSectionLink">
+                            <div class="footerNavSectionLinkText">FAQ</div>
+                        </a>
+                    
+                        <a href="contact-us-customer-reviews.html" class="footerNavSectionLink">
+                            <div class="footerNavSectionLinkText">Reviews</div>
+                        </a>
+                    
+                        <a href="contact-us-about-sallie-and-sophia.html" class="footerNavSectionLink">
+                            <div class="footerNavSectionLinkText">About Us</div>
+                        </a>
+
+<a href="contact-us-how-it-works.html" class="footerNavSectionLink">
+                            <div class="footerNavSectionLinkText">How it Works</div>
+                        </a>
+                    
+                         
+                    
+                </div>
+            
+                <div class="footerNavSection">
+                    <h3 class="footerNavSectionTitle">Support</h3>
+                    
+                        <a href="contact-us.html" class="footerNavSectionLink">
+                            <div class="footerNavSectionLinkText">Contact Us</div>
+                        </a>
+                    
+                         <a href="order-status.php" class="footerNavSectionLink">
+                            <div class="footerNavSectionLinkText">Order Status</div>
+                        </a>
+                    
+                        <a href="contact-us-before-and-after.html" class="footerNavSectionLink">
+                            <div class="footerNavSectionLinkText">What Will My Pet Look Like?</div>
+                        </a>
+                    
+                </div>
+            
+                <div class="footerNavSection">
+                    <h3 class="footerNavSectionTitle">Store Policies</h3>
+                    
+                        <a href="refund-policy.html" class="footerNavSectionLink">
+                            <div class="footerNavSectionLinkText">Refund Policy</div>
+                        </a>
+                    
+                        <a href="privacy-policy.html" class="footerNavSectionLink">
+                            <div class="footerNavSectionLinkText">Privacy Policy</div>
+                        </a>
+                    
+                        <a href="terms-of-service.html" class="footerNavSectionLink">
+                            <div class="footerNavSectionLinkText">Terms of Service</div>
+                        </a>
+                    
+                </div>
+            
+        </nav>
+    </div>
+
+
+    <div id="footerBottom">
+        <div id="footerBottomLegal"><p>© 2024 Pet Creations Art. All Rights Reserved.</p></div>
+    </div>
+</footer>
+
+
+
+</div>
+    
+ 
+ 
+ 
+
+
+
+</div><div id="shopify-block-AVElYbHJnemxjbVVrN__10840395464443086010" class="shopify-block shopify-app-block">
+
+
+</div>
+
+
+</body>
+</html>
+
+
+
+<?php    
+}
+//end if , ========================网页代码结束
+?>
